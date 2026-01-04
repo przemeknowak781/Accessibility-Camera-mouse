@@ -1,0 +1,552 @@
+import time
+import cv2
+import numpy as np
+from screeninfo import get_monitors
+
+from src.config import Config
+from src.camera import ThreadedCamera
+from src.controller import MouseController
+from src.accel import MotionAccelerator
+from src.event_log import EventLog
+from src.eye_tracker import EyeTracker
+from src.face_blink import FaceBlinkDetector
+from src.head_motion import HeadMotion
+from src.hand_detector import HandDetector
+from src.mapper import CoordinateMapper
+from src.one_euro import OneEuroFilter
+from src.smoother import MotionSmoother
+from src.ui import HudRenderer
+
+
+def get_monitor_layout():
+    monitors = get_monitors()
+    if not monitors:
+        return (1920, 1080, 0, 0), (0, 0, 1919, 1079)
+
+    if 0 <= Config.MONITOR_INDEX < len(monitors):
+        monitor = monitors[Config.MONITOR_INDEX]
+    else:
+        monitor = next(
+            (m for m in monitors if getattr(m, "is_primary", False)), monitors[0]
+        )
+    bounds = (
+        monitor.x,
+        monitor.y,
+        monitor.x + monitor.width - 1,
+        monitor.y + monitor.height - 1,
+    )
+    return (monitor.width, monitor.height, monitor.x, monitor.y), bounds
+
+
+def main():
+    # Load settings from Config
+    cam_w = Config.CAM_WIDTH
+    cam_h = Config.CAM_HEIGHT
+    
+    (screen_w, screen_h, screen_x, screen_y), bounds = get_monitor_layout()
+
+    # Initialize Threaded Camera
+    camera = ThreadedCamera(Config.CAM_ID, cam_w, cam_h)
+    camera.start()
+
+    detector = HandDetector(
+        min_detection_confidence=0.7,
+        min_tracking_confidence=0.5
+    )
+    face_tracker = None
+    if Config.BLINK_ENABLED or Config.MOVEMENT_MODE == "HEAD":
+        frame_skip = Config.BLINK_FRAME_SKIP
+        if Config.MOVEMENT_MODE == "HEAD":
+            frame_skip = Config.HEAD_FRAME_SKIP
+        face_tracker = FaceBlinkDetector(
+            frame_skip=frame_skip,
+            input_size=Config.BLINK_INPUT_SIZE,
+            blink_threshold=Config.BLINK_THRESHOLD,
+            blink_frames=Config.BLINK_FRAMES,
+            cooldown=Config.BLINK_COOLDOWN,
+        )
+    
+    backend = Config.MOUSE_BACKEND
+    if backend == "auto":
+        if screen_x != 0 or screen_y != 0 or bounds[0] < 0 or bounds[1] < 0:
+            backend = "pynput"
+        else:
+            backend = "autopy"
+    mouse = MouseController(backend=backend)
+    if backend == "pynput":
+        mouse.set_bounds(*bounds)
+    monitor_label = Config.MONITOR_INDEX if Config.MONITOR_INDEX >= 0 else "primary"
+    print(
+        f"Using Monitor {monitor_label}: {screen_w}x{screen_h} @ ({screen_x},{screen_y})"
+    )
+    print(f"Mouse backend: {backend}")
+        
+    smoother_x = OneEuroFilter(min_cutoff=Config.SMOOTHING_MIN_CUTOFF, beta=Config.SMOOTHING_BETA)
+    smoother_y = OneEuroFilter(min_cutoff=Config.SMOOTHING_MIN_CUTOFF, beta=Config.SMOOTHING_BETA)
+    motion_smoother = MotionSmoother(max_speed=Config.MOTION_MAX_SPEED, damping=Config.MOTION_DAMPING)
+    accelerator = MotionAccelerator(
+        min_speed=Config.ACCEL_MIN_SPEED,
+        max_speed=Config.ACCEL_MAX_SPEED,
+        max_gain=Config.ACCEL_MAX_GAIN,
+        exp=Config.ACCEL_EXP,
+    )
+    head_motion = HeadMotion(
+        (screen_w, screen_h),
+        (screen_x, screen_y),
+        sensitivity=Config.HEAD_SENSITIVITY,
+        deadzone=Config.HEAD_DEADZONE,
+        min_speed=Config.HEAD_SPEED_MIN,
+        max_speed=Config.HEAD_SPEED_MAX,
+        exp=Config.HEAD_EXP,
+        neutral_alpha=Config.HEAD_NEUTRAL_ALPHA,
+        micro_gain=Config.HEAD_MICRO_GAIN,
+        stop_threshold=Config.HEAD_STOP_THRESHOLD,
+        stop_hold=Config.HEAD_STOP_HOLD,
+    )
+    eye_tracker = EyeTracker(
+        smooth_alpha=Config.EYE_SMOOTH_ALPHA,
+        gain=Config.EYE_GAIN,
+        neutral_alpha=Config.EYE_NEUTRAL_ALPHA,
+    )
+    
+    mapper = CoordinateMapper((cam_w, cam_h), (screen_w, screen_h), Config.FRAME_MARGIN, (screen_x, screen_y))
+    
+    hud = HudRenderer((cam_w, cam_h))
+    event_log = EventLog(Config.EVENT_LOG_PATH, Config.EVENT_LOG_MAX)
+
+    prev_time = time.time()
+    print("Handsteer Started. Press ESC to exit.")
+
+    # Spacebar Toggle Logic
+    tracking_enabled = True
+    movement_mode = Config.MOVEMENT_MODE
+    accel_enabled = Config.ACCEL_ENABLED
+    accel_max_gain = Config.ACCEL_MAX_GAIN
+    accel_min_speed = Config.ACCEL_MIN_SPEED
+    accel_max_speed = Config.ACCEL_MAX_SPEED
+    accel_exp = Config.ACCEL_EXP
+    head_sensitivity = Config.HEAD_SENSITIVITY
+    head_deadzone = Config.HEAD_DEADZONE
+    head_speed = Config.HEAD_SPEED_MAX
+    head_exp = Config.HEAD_EXP
+    head_neutral_alpha = Config.HEAD_NEUTRAL_ALPHA
+    head_micro_gain = Config.HEAD_MICRO_GAIN
+    head_stop_threshold = Config.HEAD_STOP_THRESHOLD
+    head_stop_hold = Config.HEAD_STOP_HOLD
+    head_fine_scale = Config.HEAD_FINE_SCALE
+    hand_fine_scale = Config.HAND_FINE_SCALE
+    eye_gain = Config.EYE_GAIN
+    eye_smooth = Config.EYE_SMOOTH_ALPHA
+    eye_neutral_alpha = Config.EYE_NEUTRAL_ALPHA
+    calibration_active = False
+    calibration_points = [
+        ("BL", "Bottom Left", (0.1, 0.9)),
+        ("BR", "Bottom Right", (0.9, 0.9)),
+        ("TR", "Top Right", (0.9, 0.1)),
+        ("TL", "Top Left", (0.1, 0.1)),
+    ]
+    calibration_index = 0
+    last_gaze = None
+    render_enabled = Config.RENDER_ENABLED
+    
+    from pynput import keyboard
+    
+    def on_key_press(key):
+        nonlocal tracking_enabled, movement_mode, face_tracker
+        nonlocal accel_enabled, accel_max_gain, accel_min_speed, accel_max_speed, accel_exp
+        nonlocal head_sensitivity, head_deadzone
+        nonlocal head_speed, head_exp, head_neutral_alpha
+        nonlocal head_micro_gain, head_stop_threshold, head_stop_hold
+        nonlocal head_fine_scale, hand_fine_scale
+        nonlocal eye_gain, eye_smooth, eye_neutral_alpha
+        nonlocal calibration_active, calibration_index, last_gaze
+        nonlocal render_enabled
+        if key == keyboard.Key.space:
+            tracking_enabled = not tracking_enabled
+            if tracking_enabled:
+                 print("Resumed.")
+                 motion_smoother.reset()
+                 accelerator.reset()
+                 head_motion.reset()
+            else:
+                 print("Paused.")
+            return
+
+        try:
+            if key.char == '1':
+                movement_mode = "ABSOLUTE"
+                print("Mode ABSOLUTE")
+                head_motion.reset()
+                calibration_active = False
+                return
+            if key.char == '2':
+                movement_mode = "HEAD"
+                print("Mode HEAD")
+                if face_tracker is None:
+                    face_tracker = FaceBlinkDetector(
+                        frame_skip=Config.HEAD_FRAME_SKIP,
+                        input_size=Config.BLINK_INPUT_SIZE,
+                        blink_threshold=Config.BLINK_THRESHOLD,
+                        blink_frames=Config.BLINK_FRAMES,
+                        cooldown=Config.BLINK_COOLDOWN,
+                    )
+                head_motion.reset()
+                calibration_active = False
+                return
+            if key.char == '3':
+                movement_mode = "EYE_HYBRID"
+                print("Mode EYE_HYBRID")
+                if face_tracker is None:
+                    face_tracker = FaceBlinkDetector(
+                        frame_skip=Config.HEAD_FRAME_SKIP,
+                        input_size=Config.BLINK_INPUT_SIZE,
+                        blink_threshold=Config.BLINK_THRESHOLD,
+                        blink_frames=Config.BLINK_FRAMES,
+                        cooldown=Config.BLINK_COOLDOWN,
+                    )
+                head_motion.reset()
+                eye_tracker.reset()
+                eye_tracker.start_calibration()
+                calibration_active = True
+                calibration_index = 0
+                return
+            if key.char == '4':
+                movement_mode = "EYE_HAND"
+                print("Mode EYE_HAND")
+                if face_tracker is None:
+                    face_tracker = FaceBlinkDetector(
+                        frame_skip=Config.HEAD_FRAME_SKIP,
+                        input_size=Config.BLINK_INPUT_SIZE,
+                        blink_threshold=Config.BLINK_THRESHOLD,
+                        blink_frames=Config.BLINK_FRAMES,
+                        cooldown=Config.BLINK_COOLDOWN,
+                    )
+                eye_tracker.reset()
+                eye_tracker.start_calibration()
+                calibration_active = True
+                calibration_index = 0
+                return
+            if key.char in ('a', 'A'):
+                accel_enabled = not accel_enabled
+                print(f"Accel {'ON' if accel_enabled else 'OFF'}")
+                return
+            if key.char == '[':
+                accel_max_gain = max(1.0, accel_max_gain - 0.1)
+            if key.char == ']':
+                accel_max_gain = min(12.0, accel_max_gain + 0.1)
+            if key.char == '-':
+                head_sensitivity = max(0.5, head_sensitivity - 0.1)
+            if key.char == '=':
+                head_sensitivity = min(20.0, head_sensitivity + 0.1)
+            if key.char == 'z':
+                head_deadzone = max(0.0, head_deadzone - 0.001)
+            if key.char == 'x':
+                head_deadzone = min(0.2, head_deadzone + 0.001)
+            if key.char == ',':
+                head_speed = max(200.0, head_speed - 100.0)
+            if key.char == '.':
+                head_speed = min(8000.0, head_speed + 100.0)
+            if key.char == '/':
+                head_exp = max(0.3, head_exp - 0.1)
+            if key.char == '\\\\':
+                head_exp = min(4.0, head_exp + 0.1)
+            if key.char == 'n':
+                head_neutral_alpha = max(0.01, head_neutral_alpha - 0.01)
+            if key.char == 'm':
+                head_neutral_alpha = min(0.5, head_neutral_alpha + 0.01)
+            if key.char == 'u':
+                head_micro_gain = max(0.5, head_micro_gain - 0.1)
+            if key.char == 'i':
+                head_micro_gain = min(8.0, head_micro_gain + 0.1)
+            if key.char == 'j':
+                head_stop_threshold = max(0.001, head_stop_threshold - 0.002)
+            if key.char == 'k':
+                head_stop_threshold = min(0.1, head_stop_threshold + 0.002)
+            if key.char == 'o':
+                head_stop_hold = max(0.02, head_stop_hold - 0.02)
+            if key.char == 'p':
+                head_stop_hold = min(1.0, head_stop_hold + 0.02)
+            if key.char == 't':
+                head_fine_scale = max(0.05, head_fine_scale - 0.05)
+            if key.char == 'y':
+                head_fine_scale = min(1.0, head_fine_scale + 0.05)
+            if key.char == 'l':
+                hand_fine_scale = max(0.05, hand_fine_scale - 0.05)
+            if key.char == ';':
+                hand_fine_scale = min(1.0, hand_fine_scale + 0.05)
+            if key.char == 'v':
+                eye_gain = max(0.5, eye_gain - 0.1)
+            if key.char == 'b':
+                eye_gain = min(5.0, eye_gain + 0.1)
+            if key.char == 'f':
+                eye_smooth = max(0.05, eye_smooth - 0.05)
+            if key.char == 'g':
+                eye_smooth = min(0.9, eye_smooth + 0.05)
+            if key.char == 'q':
+                eye_neutral_alpha = max(0.01, eye_neutral_alpha - 0.01)
+            if key.char == 'w':
+                eye_neutral_alpha = min(0.3, eye_neutral_alpha + 0.01)
+            if key.char == 'c' and movement_mode == "EYE_HYBRID":
+                eye_tracker.start_calibration()
+                calibration_active = True
+                calibration_index = 0
+            if key.char in ('v', 'V'):
+                render_enabled = not render_enabled
+                print(f"Preview {'ON' if render_enabled else 'OFF'}")
+        except AttributeError:
+            if key == keyboard.Key.enter and calibration_active:
+                if last_gaze is not None:
+                    label, _, _ = calibration_points[calibration_index]
+                    eye_tracker.add_calibration_sample(label, last_gaze)
+                    calibration_index += 1
+                    if calibration_index >= len(calibration_points):
+                        calibration_active = not eye_tracker.finish_calibration()
+                        calibration_index = 0
+            return
+
+    listener = keyboard.Listener(on_press=on_key_press)
+    listener.start()
+
+    while True:
+        success, frame = camera.read()
+        if not success:
+            # If camera is just starting up, it might send None
+            time.sleep(0.01)
+            continue
+
+        # MediaPipe expects RGB, but we work in BGR for OpenCV
+        # Flipping for mirror effect
+        frame = cv2.flip(frame, 1)
+        
+        # Only process if enabled
+        click_active = False
+        screen_coords = None
+        probs = {"blink": None, "pinch": None}
+        landmarks = []
+        gaze = None
+        gaze_display = None
+        blink_type = None
+
+        if tracking_enabled:
+            detector.find_hands(frame, draw=True)
+            landmarks = detector.find_position(frame)
+
+        index_tip = None
+        thumb_tip = None
+
+
+        # Extract specific landmarks
+        for idx, x, y, z in landmarks:
+            if idx == 8:
+                index_tip = (x, y, z)
+            elif idx == 4:
+                thumb_tip = (x, y, z)
+
+        if tracking_enabled and (index_tip or movement_mode in ("HEAD", "EYE_HYBRID", "EYE_HAND")):
+            now = time.time()
+
+            if movement_mode in ("HEAD", "EYE_HYBRID", "EYE_HAND"):
+                if face_tracker is None:
+                    face_tracker = FaceBlinkDetector(
+                        frame_skip=Config.HEAD_FRAME_SKIP,
+                        input_size=Config.BLINK_INPUT_SIZE,
+                        blink_threshold=Config.BLINK_THRESHOLD,
+                        blink_frames=Config.BLINK_FRAMES,
+                        cooldown=Config.BLINK_COOLDOWN,
+                    )
+                blink_type = face_tracker.process(frame, now)
+                head_motion.sensitivity = head_sensitivity
+                head_motion.deadzone = head_deadzone
+                head_motion.max_speed = head_speed
+                head_motion.exp = head_exp
+                head_motion.neutral_alpha = head_neutral_alpha
+                head_motion.micro_gain = head_micro_gain
+                head_motion.stop_threshold = head_stop_threshold
+                head_motion.stop_hold = head_stop_hold
+                delta = head_motion.compute(face_tracker.last_landmarks, now)
+                if movement_mode == "HEAD":
+                    if delta is not None:
+                        dx, dy = delta
+                        curr_x, curr_y = mouse.get_position()
+                        x_target = curr_x + dx
+                        y_target = curr_y + dy
+                    elif index_tip:
+                        x_cam, y_cam, _ = index_tip
+                        x_target, y_target = mapper.map(x_cam, y_cam)
+                    else:
+                        x_target, y_target = None, None
+                elif movement_mode == "EYE_HYBRID":
+                    eye_tracker.gain = eye_gain
+                    eye_tracker.smooth_alpha = eye_smooth
+                    eye_tracker.neutral_alpha = eye_neutral_alpha
+                    gaze = eye_tracker.compute(face_tracker.last_landmarks)
+                    last_gaze = gaze
+                    if gaze is not None:
+                        mapped = eye_tracker.map_to_screen(gaze)
+                        gx, gy = mapped if mapped is not None else gaze
+                        gaze_display = (gx, gy)
+                        x_target = screen_x + gx * screen_w
+                        y_target = screen_y + gy * screen_h
+                    elif delta is not None:
+                        dx, dy = delta
+                        curr_x, curr_y = mouse.get_position()
+                        x_target = curr_x + dx
+                        y_target = curr_y + dy
+                    else:
+                        x_target, y_target = None, None
+                else:
+                    eye_tracker.gain = eye_gain
+                    eye_tracker.smooth_alpha = eye_smooth
+                    eye_tracker.neutral_alpha = eye_neutral_alpha
+                    gaze = eye_tracker.compute(face_tracker.last_landmarks)
+                    last_gaze = gaze
+                    if gaze is not None:
+                        mapped = eye_tracker.map_to_screen(gaze)
+                        gx, gy = mapped if mapped is not None else gaze
+                        gaze_display = (gx, gy)
+                        x_target = screen_x + gx * screen_w
+                        y_target = screen_y + gy * screen_h
+                        if index_tip:
+                            x_cam, y_cam, _ = index_tip
+                            hand_x, hand_y = mapper.map(x_cam, y_cam)
+                            x_target += (hand_x - (screen_x + screen_w * 0.5)) * hand_fine_scale
+                            y_target += (hand_y - (screen_y + screen_h * 0.5)) * hand_fine_scale
+                    else:
+                        x_target, y_target = None, None
+            else:
+                x_cam, y_cam, _ = index_tip
+                x_target, y_target = mapper.map(x_cam, y_cam)
+
+            accelerator.max_gain = accel_max_gain
+            accelerator.min_speed = accel_min_speed
+            accelerator.max_speed = accel_max_speed
+            accelerator.exp = accel_exp
+
+            if movement_mode != "HEAD" and x_target is not None and accel_enabled:
+                x_target, y_target = accelerator.apply(x_target, y_target, now)
+
+            # 1. Jitter reduction (Smooth input first)
+            if calibration_active:
+                x_target = None
+                y_target = None
+
+            if x_target is not None:
+                x_in = smoother_x.filter(x_target, now)
+                y_in = smoother_y.filter(y_target, now)
+
+                x_smooth, y_smooth = motion_smoother.apply(x_in, y_in, now)
+                # Clamp to monitor bounds
+                x_smooth = max(screen_x, min(x_smooth, screen_x + screen_w - 1))
+                y_smooth = max(screen_y, min(y_smooth, screen_y + screen_h - 1))
+                mouse.move(x_smooth, y_smooth)
+                screen_coords = (x_smooth, y_smooth)
+
+            # Blink Detection
+            if face_tracker and Config.ENABLE_BLINK_CLICK:
+                if movement_mode not in ("HEAD", "EYE_HYBRID"):
+                    blink_type = face_tracker.process(frame, now)
+                probs["blink"] = face_tracker.last_prob
+
+                if blink_type:
+                    event_log.add(f"BLINK_{blink_type}", now)
+
+                    should_click = True
+                    if blink_type == 'BOTH' and Config.IGNORE_DOUBLE_BLINK:
+                        should_click = False
+
+                    if should_click:
+                        click_active = mouse.update_blink(True)
+                        if click_active:
+                            event_log.add("PULSE_CLICK", now)
+
+            # Pinch Detection
+            if thumb_tip and Config.ENABLE_PINCH_CLICK:
+                # Euclidean distance for basic pinch check
+                dist = np.hypot(index_tip[0] - thumb_tip[0], index_tip[1] - thumb_tip[1])
+
+                # Check Z-depth difference to avoid false clicks when fingers overlap in 2D but are apart in 3D
+                depth_gap = abs(index_tip[2] - thumb_tip[2])
+                if depth_gap > Config.CLICK_DEPTH_THRESHOLD:
+                    dist = Config.CLICK_THRESHOLD * 2.0  # Force no-click
+
+                probs["pinch"] = max(
+                    0.0, min(1.0, 1.0 - (dist / Config.CLICK_THRESHOLD))
+                )
+                drag_active = mouse.update_drag(dist)
+                if drag_active and not click_active:
+                    event_log.add("PINCH_DRAG", now)
+
+                # OR logic: Click if Blink OR pinch drag active
+                click_active = click_active or drag_active
+        else:
+            accelerator.reset()
+        # Draw HUD even if disabled, but show PAUSED
+        now = time.time()
+        fps = 1.0 / max(now - prev_time, 1e-6)
+        prev_time = now
+
+        tune = []
+        tune.append(("Mode", f"{movement_mode}", ["1", "2", "3", "4"]))
+        tune.append(("Accel", f"{'on' if accel_enabled else 'off'}", ["A"]))
+        tune.append(("Gain", f"{accel_max_gain:.2f}", ["[", "]"]))
+        if movement_mode == "HEAD":
+            tune.append(("HeadSens", f"{head_sensitivity:.2f}", ["-", "="]))
+            tune.append(("Deadzone", f"{head_deadzone:.3f}", ["z", "x"]))
+            tune.append(("Speed", f"{head_speed:.0f}", [",", "."]))
+            tune.append(("Exp", f"{head_exp:.2f}", ["/", "\\"]))
+            tune.append(("Neutral", f"{head_neutral_alpha:.2f}", ["n", "m"]))
+            tune.append(("MicroGain", f"{head_micro_gain:.2f}", ["u", "i"]))
+            tune.append(("StopTh", f"{head_stop_threshold:.3f}", ["j", "k"]))
+            tune.append(("StopHold", f"{head_stop_hold:.2f}", ["o", "p"]))
+        if movement_mode == "EYE_HYBRID":
+            tune.append(("EyeGain", f"{eye_gain:.2f}", ["v", "b"]))
+            tune.append(("EyeSmooth", f"{eye_smooth:.2f}", ["f", "g"]))
+            tune.append(("EyeNeutral", f"{eye_neutral_alpha:.2f}", ["q", "w"]))
+        if movement_mode == "EYE_HAND":
+            tune.append(("HandFine", f"{hand_fine_scale:.2f}", ["l", ";"]))
+            tune.append(("EyeGain", f"{eye_gain:.2f}", ["v", "b"]))
+            tune.append(("EyeSmooth", f"{eye_smooth:.2f}", ["f", "g"]))
+            tune.append(("EyeNeutral", f"{eye_neutral_alpha:.2f}", ["q", "w"]))
+            tune.append(("Calib", "ENTER", ["c", "Enter"]))
+            # MinGain removed (HEAD_MIN_GAIN no longer used)
+
+        calibration = None
+        if calibration_active and movement_mode == "EYE_HYBRID":
+            label, name, target = calibration_points[calibration_index]
+            calibration = (name, target, calibration_index + 1, len(calibration_points))
+
+        if render_enabled:
+            hud.draw_hud(
+                frame,
+                fps,
+                click_active,
+                screen_coords,
+                event_log.recent(),
+                probs,
+                paused=not tracking_enabled,
+                mode_label=movement_mode,
+                tune=tune,
+                gaze=gaze_display,
+                calibration=calibration,
+            )
+
+            cv2.imshow('Handsteer', frame)
+
+            # Keep CV2 waitKey for window interaction (ESC to quit)
+            if cv2.waitKey(1) & 0xFF == 27:
+                break
+        else:
+            time.sleep(0.001)
+
+    listener.stop()
+    camera.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        input("Press Enter to Exit...")
