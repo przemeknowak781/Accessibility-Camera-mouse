@@ -1,22 +1,22 @@
-# Accessibility Camera Mouse
+# Handsteer
 
-Handsteer is a lightweight, camera‑based mouse controller designed for accessibility use‑cases. It uses hand tracking plus optional head and eye tracking to control the cursor without a physical mouse.
+Handsteer is a lightweight, camera-based mouse controller for accessibility. It uses hand tracking and optional head and eye tracking to move the cursor without a physical mouse. The app focuses on precision, stability, and fast switching between control styles.
 
 ## Features
-- Hand cursor with smoothing and acceleration.
-- Relative hand mode for touchpad-style movement.
-- Pinch‑to‑hold for drag & drop.
-- Blink click (optional).
-- Head mode for hands‑free control.
-- Eye‑hand hybrid: eyes for fast positioning, hand for fine tuning.
-- On‑screen HUD with live tuning.
-- Calibration flow for eye tracking (4 corners).
+- Hand cursor with smoothing and optional acceleration.
+- Relative hand mode (touchpad style).
+- Pinch-to-hold drag and blink click.
+- Head-only mode and eye+head / eye+hand hybrids.
+- Smart snapping (UIA-based magnet to clickable targets).
+- Presets for different precision/speed profiles.
+- On-screen HUD with live tuning.
+- Mini always-on-top preview for throttling-safe mode.
 
 ## Requirements
 - Windows 10/11
 - Python 3.10+
-- Camera (webcam)
-- Optional: `autopy` (legacy, may fail to install on newer Python versions)
+- Webcam
+- Optional: `uiautomation` for smart snapping
 
 ## Install
 ```powershell
@@ -30,7 +30,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Or double‑click:
+Or double-click:
 ```
 run.bat
 ```
@@ -39,12 +39,16 @@ run.bat
 General:
 - `Space` toggle pause
 - `Esc` quit
-- `V` toggle preview on/off (headless mode)
+- `V` toggle preview on/off
+- `M` toggle mini always-on-top window
+- `S` toggle smart snapping
+- `F6` cycle preset
+- Long blink (hold both eyes closed ~0.7s): center cursor
 
 Modes:
-- `0` RELATIVE (touchpad-style hand movement)
+- `0` RELATIVE (touchpad-style hand)
 - `1` ABSOLUTE (hand cursor)
-- `2` HEAD (head‑only)
+- `2` HEAD (head-only)
 - `3` EYE_HYBRID (eyes + head fine)
 - `4` EYE_HAND (eyes + hand fine)
 - `5` TILT_HYBRID (hand tilt + fine hand)
@@ -69,28 +73,58 @@ Eye:
 - Neutral adapt: `q` / `w`
 - Calibration: `c` (then press `Enter` at each prompt)
 
-Hand fine (eye‑hand mode):
+Hand fine (eye-hand mode):
 - Fine scale: `l` / `;`
 
-## Eye Calibration
-In `EYE_HYBRID` or `EYE_HAND` mode:
-1) Look at **Bottom Left** → press `Enter` and hold still for ~1s
-2) Look at **Bottom Right** → press `Enter` and hold still for ~1s
-3) Look at **Top Right** → press `Enter` and hold still for ~1s
-4) Look at **Top Left** → press `Enter` and hold still for ~1s
+## Presets
+Press `F6` to cycle presets:
+- `precision` (default): maximum micro-control.
+- `balanced`: smooth compromise.
+- `fast`: quicker mid-range movement.
+- `stable`: extra smoothing for noisy tracking.
+- `legacy`: previous defaults for A/B testing.
 
-The gaze dot shows your current mapped eye position. Recalibrate anytime with `c`.
+## Smart Snapping
+Smart snapping uses UI Automation to pull the cursor toward interactive controls.
+- Enable/disable with `S`.
+- Trigger mode defaults to always-on (see `Config.SNAP_TRIGGER_MODE`).
+- Brows raise can be used as a trigger.
+- If snapping feels weak, adjust `SNAP_RADIUS` and `SNAP_STRENGTH` in `src/config.py`.
+
+Diagnostics:
+- Press `D` to log the element under the cursor (`SNAP_DEBUG` in `events.log`).
+- Run `python diagnose_snap.py` to verify UIA availability.
+- Run `python debug_brows.py` to measure brow ratios.
 
 ## Configuration
-Edit `src/config.py` for defaults:
-- Movement mode, thresholds, smoothing, and acceleration.
-- Head tracking sensitivity and speed.
-- Eye tracking gain and smoothing.
+Defaults live in `src/config.py`:
+- Camera size and backend (`CAM_BACKEND`: `auto`, `msmf`, `dshow`)
+- Movement mode, smoothing, and acceleration
+- Head and eye parameters
+- Snap tuning (radius, strength, hold, and trigger)
+- Monitor selection and mouse backend
+
+## Architecture
+Key modules:
+- `src/smart_snap.py`: UIA scanning and target selection.
+- `src/snap_controller.py`: activation logic, smoothing, and hold.
+- `src/mouse_driver.py`: cursor output, snap gravity, and override.
+- `src/head_motion.py`: head-based motion and neutral handling.
+- `src/face_blink.py`: blink/long-blink/brows detection.
+- `src/eye_tracker.py`: gaze mapping and calibration.
+- `src/frame_schedule.py`: per-frame detector scheduling.
+- `src/window_utils.py`: mini window placement and topmost handling.
 
 ## Troubleshooting
-- If performance drops when minimized, press `V` to disable preview.
-- If mouse movement feels off on multi‑monitor setups, set `MONITOR_INDEX` in `src/config.py`.
-- If autopy drag fails, switch to `MOUSE_BACKEND = "pynput"`.
+- If the preview causes CPU throttling, press `V` or use mini mode (`M`).
+- If the camera is blank, try `CAM_BACKEND = "dshow"` in `src/config.py`.
+- If snap never finds targets in Chromium-based apps, ensure accessibility is enabled.
+- For multi-monitor setups, set `MONITOR_INDEX` in `src/config.py`.
+
+## Tests
+```powershell
+python -m unittest discover -s tests
+```
 
 ## Safety
-This app controls the system mouse. Keep `Esc` available for quick exit.
+This app controls the system cursor. Keep `Esc` available to quit quickly.

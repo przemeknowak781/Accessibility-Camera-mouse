@@ -3,3 +3,5 @@ mediapipe
 numpy
 pynput
 screeninfo
+uiautomation
+pywinauto

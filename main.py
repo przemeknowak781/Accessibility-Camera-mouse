@@ -1,9 +1,5 @@
-import ctypes
 import time
 import cv2
-import numpy as np
-from screeninfo import get_monitors
-
 from src.config import Config
 from src.camera import ThreadedCamera
 from src.controller import MouseController
@@ -17,109 +13,47 @@ from src.hybrid_motion import HybridMotion
 from src.mapper import CoordinateMapper
 from src.mouse_driver import MouseDriver
 from src.one_euro import OneEuroFilter
+from src.frame_schedule import schedule_detectors
+from src.camera_watchdog import is_camera_stalled
+from src.presets import apply_preset, next_preset_name
 from src.relative_motion import RelativeMotion
+from src.snap_controller import SnapController
+from src.snap_overlay import SnapOverlay
 from src.smoother import MotionSmoother
 from src.tilt_mapper import TiltMapper
 from src.ui import HudRenderer
-
-
-def set_window_topmost(window_name, topmost=True):
-    """Set an OpenCV window to always-on-top on Windows."""
-    try:
-        hwnd = ctypes.windll.user32.FindWindowW(None, window_name)
-        if hwnd:
-            HWND_TOPMOST = -1
-            HWND_NOTOPMOST = -2
-            SWP_NOMOVE = 0x0002
-            SWP_NOSIZE = 0x0001
-            SWP_NOACTIVATE = 0x0010
-            SWP_SHOWWINDOW = 0x0040
-            target = HWND_TOPMOST if topmost else HWND_NOTOPMOST
-            ctypes.windll.user32.SetWindowPos(
-                hwnd,
-                target,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            )
-    except Exception:
-        pass
-
-
-def enforce_window_topmost(window_name):
-    try:
-        cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
-    except Exception:
-        pass
-    set_window_topmost(window_name, True)
-
-
-def get_mini_window_size(max_w=320, aspect=16 / 9):
-    max_w = max(int(max_w), 1)
-    width = max_w
-    height = max(int(round(width / aspect)), 1)
-    return width, height
-
-
-def resize_with_letterbox(frame, target_w, target_h):
-    src_h, src_w = frame.shape[:2]
-    scale = min(target_w / max(src_w, 1), target_h / max(src_h, 1))
-    new_w = max(int(round(src_w * scale)), 1)
-    new_h = max(int(round(src_h * scale)), 1)
-    resized = cv2.resize(frame, (new_w, new_h))
-    output = np.zeros((target_h, target_w, 3), dtype=frame.dtype)
-    x = (target_w - new_w) // 2
-    y = (target_h - new_h) // 2
-    output[y : y + new_h, x : x + new_w] = resized
-    return output
-
-
-def position_mini_window(window_name, screen_x, screen_y, screen_w, screen_h, win_w, win_h):
-    margin = 16
-    x = screen_x + margin
-    y = screen_y + margin
-    cv2.moveWindow(window_name, max(screen_x, x), max(screen_y, y))
-
-
-def get_monitor_layout():
-    monitors = get_monitors()
-    if not monitors:
-        return (1920, 1080, 0, 0), (0, 0, 1919, 1079)
-
-    if 0 <= Config.MONITOR_INDEX < len(monitors):
-        monitor = monitors[Config.MONITOR_INDEX]
-    else:
-        monitor = next(
-            (m for m in monitors if getattr(m, "is_primary", False)), monitors[0]
-        )
-    bounds = (
-        monitor.x,
-        monitor.y,
-        monitor.x + monitor.width - 1,
-        monitor.y + monitor.height - 1,
-    )
-    return (monitor.width, monitor.height, monitor.x, monitor.y), bounds
-
-
+from src.window_utils import (
+    enforce_window_topmost,
+    get_mini_window_size,
+    get_monitor_layout,
+    position_mini_window,
+    resize_with_letterbox,
+    set_window_topmost,
+)
 def main():
+    active_preset = apply_preset(Config, getattr(Config, "PRESET_NAME", None))
+    print(f"Preset: {active_preset}")
     # Load settings from Config
     cam_w = Config.CAM_WIDTH
     cam_h = Config.CAM_HEIGHT
-    
-    (screen_w, screen_h, screen_x, screen_y), bounds = get_monitor_layout()
+    (screen_w, screen_h, screen_x, screen_y), bounds = get_monitor_layout(
+        Config.MONITOR_INDEX
+    )
 
     # Initialize Threaded Camera
-    camera = ThreadedCamera(Config.CAM_ID, cam_w, cam_h)
+    camera = ThreadedCamera(Config.CAM_ID, cam_w, cam_h, backend=Config.CAM_BACKEND)
     camera.start()
-
     detector = HandDetector(
         min_detection_confidence=0.7,
         min_tracking_confidence=0.5
     )
     face_tracker = None
-    if Config.BLINK_ENABLED or Config.MOVEMENT_MODE == "HEAD":
+    if (
+        Config.BLINK_ENABLED
+        or Config.LONG_BLINK_SECONDS > 0
+        or Config.SNAP_TRIGGER_MODE == "BROWS"
+        or Config.MOVEMENT_MODE == "HEAD"
+    ):
         frame_skip = Config.BLINK_FRAME_SKIP
         if Config.MOVEMENT_MODE == "HEAD":
             frame_skip = Config.HEAD_FRAME_SKIP
@@ -130,7 +64,6 @@ def main():
             blink_frames=Config.BLINK_FRAMES,
             cooldown=Config.BLINK_COOLDOWN,
         )
-    
     backend = Config.MOUSE_BACKEND
     if backend == "auto":
         if screen_x != 0 or screen_y != 0 or bounds[0] < 0 or bounds[1] < 0:
@@ -150,7 +83,14 @@ def main():
         
     smoother_x = OneEuroFilter(min_cutoff=Config.SMOOTHING_MIN_CUTOFF, beta=Config.SMOOTHING_BETA)
     smoother_y = OneEuroFilter(min_cutoff=Config.SMOOTHING_MIN_CUTOFF, beta=Config.SMOOTHING_BETA)
-    motion_smoother = MotionSmoother(max_speed=Config.MOTION_MAX_SPEED, damping=Config.MOTION_DAMPING)
+    motion_smoother = MotionSmoother(
+        max_speed=Config.MOTION_MAX_SPEED,
+        damping=Config.MOTION_DAMPING,
+        precision_radius=Config.HEAD_PRECISION_RADIUS,
+        precision_damping=Config.HEAD_PRECISION_DAMPING,
+        micro_radius=Config.HEAD_MICRO_RADIUS,
+        micro_damping=Config.HEAD_MICRO_DAMPING,
+    )
     accelerator = MotionAccelerator(
         min_speed=Config.ACCEL_MIN_SPEED,
         max_speed=Config.ACCEL_MAX_SPEED,
@@ -169,6 +109,9 @@ def main():
         micro_gain=Config.HEAD_MICRO_GAIN,
         stop_threshold=Config.HEAD_STOP_THRESHOLD,
         stop_hold=Config.HEAD_STOP_HOLD,
+        return_brake=Config.HEAD_RETURN_BRAKE,
+        return_brake_margin=Config.HEAD_RETURN_BRAKE_MARGIN,
+        tilt_boost=Config.HEAD_TILT_BOOST,
     )
     eye_tracker = EyeTracker(
         smooth_alpha=Config.EYE_SMOOTH_ALPHA,
@@ -185,24 +128,53 @@ def main():
         fine_weight=Config.FINE_WEIGHT,
         coarse_weight=Config.COARSE_WEIGHT,
     )
-    
     mapper = CoordinateMapper((cam_w, cam_h), (screen_w, screen_h), Config.FRAME_MARGIN, (screen_x, screen_y))
     relative_motion = RelativeMotion(
         (cam_w, cam_h),
         (screen_w, screen_h),
         sensitivity=Config.REL_SENSITIVITY,
     )
-    
     hud = HudRenderer((cam_w, cam_h))
     event_log = EventLog(Config.EVENT_LOG_PATH, Config.EVENT_LOG_MAX)
-
+    
+    # Create snap overlay for visual debugging
+    snap_overlay = SnapOverlay()
+    snap_overlay.start()
+    
+    snap_controller = SnapController(mouse_driver, event_log, overlay=snap_overlay)
+    def center_cursor(reason, timestamp=None):
+        now = time.time() if timestamp is None else float(timestamp)
+        center_x = screen_x + screen_w * 0.5
+        center_y = screen_y + screen_h * 0.5
+        motion_smoother.reset()
+        smoother_x.last_time = None
+        smoother_y.last_time = None
+        mouse_driver.update_target(center_x, center_y, timestamp=now)
+        event_log.add(f"CENTER_{reason.upper()}", now)
+    def should_exit():
+        return cv2.waitKey(1) & 0xFF == 27
     prev_time = time.time()
     last_frame_id = None
+    camera_restart_at = 0.0
+    prev_brows_raised = False
+    def restart_camera(reason, timestamp=None):
+        nonlocal camera, last_frame_id, camera_restart_at
+        now = time.time() if timestamp is None else float(timestamp)
+        if now < camera_restart_at:
+            return
+        camera_restart_at = now + Config.CAMERA_RESTART_COOLDOWN
+        event_log.add(f"CAMERA_RESTART_{reason.upper()}", now)
+        print(f"Camera restart ({reason})")
+        camera.release()
+        camera = ThreadedCamera(Config.CAM_ID, cam_w, cam_h, backend=Config.CAM_BACKEND)
+        camera.start()
+        last_frame_id = None
     print("Handsteer Started. Press ESC to exit.")
-
+    center_cursor("start", timestamp=prev_time)
     # Spacebar Toggle Logic
     tracking_enabled = True
     movement_mode = Config.MOVEMENT_MODE
+    active_preset = getattr(Config, "ACTIVE_PRESET", active_preset)
     mouse_driver.coast_window = Config.COAST_WINDOW if movement_mode == "RELATIVE" else 0.0
     accel_enabled = Config.ACCEL_ENABLED
     accel_max_gain = Config.ACCEL_MAX_GAIN
@@ -236,15 +208,13 @@ def main():
     last_gaze = None
     render_enabled = Config.RENDER_ENABLED
     relative_cursor = None
-
     mini_mode = False
     window_name = "Handsteer"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    
     from pynput import keyboard
-    
     def on_key_press(key):
         nonlocal tracking_enabled, movement_mode, face_tracker
+        nonlocal active_preset
         nonlocal accel_enabled, accel_max_gain, accel_min_speed, accel_max_speed, accel_exp
         nonlocal head_sensitivity, head_deadzone
         nonlocal head_speed, head_exp, head_neutral_alpha
@@ -256,22 +226,78 @@ def main():
         nonlocal render_enabled
         nonlocal relative_cursor
         nonlocal mini_mode
+        if key == keyboard.Key.f6:
+            active_preset = next_preset_name(active_preset, direction=1)
+            apply_preset(Config, active_preset)
+            active_preset = getattr(Config, "ACTIVE_PRESET", active_preset)
+
+            accel_enabled = Config.ACCEL_ENABLED
+            accel_max_gain = Config.ACCEL_MAX_GAIN
+            accel_min_speed = Config.ACCEL_MIN_SPEED
+            accel_max_speed = Config.ACCEL_MAX_SPEED
+            accel_exp = Config.ACCEL_EXP
+
+            head_sensitivity = Config.HEAD_SENSITIVITY
+            head_deadzone = Config.HEAD_DEADZONE
+            head_speed = Config.HEAD_SPEED_MAX
+            head_exp = Config.HEAD_EXP
+            head_neutral_alpha = Config.HEAD_NEUTRAL_ALPHA
+            head_micro_gain = Config.HEAD_MICRO_GAIN
+            head_stop_threshold = Config.HEAD_STOP_THRESHOLD
+            head_stop_hold = Config.HEAD_STOP_HOLD
+
+            eye_gain = Config.EYE_GAIN
+            eye_smooth = Config.EYE_SMOOTH_ALPHA
+            eye_neutral_alpha = Config.EYE_NEUTRAL_ALPHA
+
+            smoother_x.min_cutoff = Config.SMOOTHING_MIN_CUTOFF
+            smoother_y.min_cutoff = Config.SMOOTHING_MIN_CUTOFF
+            smoother_x.beta = Config.SMOOTHING_BETA
+            smoother_y.beta = Config.SMOOTHING_BETA
+
+            motion_smoother.max_speed = Config.MOTION_MAX_SPEED
+            motion_smoother.damping = Config.MOTION_DAMPING
+            motion_smoother.precision_radius = Config.HEAD_PRECISION_RADIUS
+            motion_smoother.precision_damping = Config.HEAD_PRECISION_DAMPING
+            motion_smoother.micro_radius = Config.HEAD_MICRO_RADIUS
+            motion_smoother.micro_damping = Config.HEAD_MICRO_DAMPING
+            motion_smoother.reset()
+            smoother_x.last_time = None
+            smoother_y.last_time = None
+
+            head_motion.min_speed = Config.HEAD_SPEED_MIN
+            mouse_driver.speed_coeff = Config.MOUSE_SPEED_COEFF
+
+            head_motion.reset()
+            accelerator.reset()
+            relative_motion.reset()
+            relative_cursor = None
+            center_cursor("preset")
+            print(f"Preset: {active_preset}")
+            return
         if key == keyboard.Key.space:
             tracking_enabled = not tracking_enabled
             if tracking_enabled:
-                 print("Resumed.")
-                 motion_smoother.reset()
-                 accelerator.reset()
-                 head_motion.reset()
-                 relative_motion.reset()
-                 relative_cursor = None
-                 mouse_driver.resume()
+                print("Resumed.")
+                motion_smoother.reset()
+                accelerator.reset()
+                head_motion.reset()
+                relative_motion.reset()
+                relative_cursor = None
+                mouse_driver.resume()
             else:
-                 print("Paused.")
-                 mouse_driver.pause()
+                print("Paused.")
+                mouse_driver.pause()
             return
 
         try:
+            if key.char in ('s', 'S'):
+                enabled = snap_controller.toggle_enabled()
+                print(f"Snap {'ON' if enabled else 'OFF'}")
+                return
+            if key.char in ('d', 'D'):
+                snap_controller.debug_probe()
+                return
             if key.char == '0':
                 movement_mode = "RELATIVE"
                 print("Mode RELATIVE")
@@ -282,6 +308,7 @@ def main():
                 relative_motion.reset()
                 relative_cursor = None
                 mouse_driver.coast_window = Config.COAST_WINDOW
+                center_cursor("mode")
                 return
             if key.char == '1':
                 movement_mode = "ABSOLUTE"
@@ -294,6 +321,7 @@ def main():
                 relative_motion.reset()
                 relative_cursor = None
                 mouse_driver.coast_window = 0.0
+                center_cursor("mode")
                 return
             if key.char == '2':
                 movement_mode = "HEAD"
@@ -314,6 +342,7 @@ def main():
                 relative_motion.reset()
                 relative_cursor = None
                 mouse_driver.coast_window = 0.0
+                center_cursor("mode")
                 return
             if key.char == '3':
                 movement_mode = "EYE_HYBRID"
@@ -337,6 +366,7 @@ def main():
                 relative_motion.reset()
                 relative_cursor = None
                 mouse_driver.coast_window = 0.0
+                center_cursor("mode")
                 return
             if key.char == '4':
                 movement_mode = "EYE_HAND"
@@ -359,6 +389,7 @@ def main():
                 relative_motion.reset()
                 relative_cursor = None
                 mouse_driver.coast_window = 0.0
+                center_cursor("mode")
                 return
             if key.char == '5':
                 movement_mode = "TILT_HYBRID"
@@ -371,6 +402,7 @@ def main():
                 relative_motion.reset()
                 relative_cursor = None
                 mouse_driver.coast_window = 0.0
+                center_cursor("mode")
                 return
             if key.char in ('a', 'A'):
                 accel_enabled = not accel_enabled
@@ -439,10 +471,10 @@ def main():
                 calibration_sampling = False
                 calibration_sample_start = 0.0
                 calibration_sample_count = 0
-            if key.char in ('v', 'V'):
+            if key.char == 'V':
                 render_enabled = not render_enabled
                 print(f"Preview {'ON' if render_enabled else 'OFF'}")
-            if key.char in ('m', 'M'):
+            if key.char == 'M':
                 mini_mode = not mini_mode
                 print(f"Mini Mode {'ON' if mini_mode else 'OFF'}")
                 if mini_mode:
@@ -471,15 +503,27 @@ def main():
 
     while True:
         success, frame, frame_id, frame_time = camera.read()
+        now_wall = time.time()
+        if is_camera_stalled(frame_time, now_wall, Config.CAMERA_STALL_SECONDS):
+            restart_camera("stall", timestamp=now_wall)
+            if should_exit():
+                break
+            time.sleep(0.01)
+            continue
         if not success:
             # If camera is just starting up, it might send None
+            if should_exit():
+                break
             time.sleep(0.01)
             continue
         if frame_id == last_frame_id:
+            if should_exit():
+                break
             time.sleep(0.001)
             continue
         last_frame_id = frame_id
-        frame_ts = frame_time if frame_time is not None else time.time()
+        frame_ts = frame_time if frame_time is not None else now_wall
+        now = frame_ts
 
         # MediaPipe expects RGB, but we work in BGR for OpenCV
         # Flipping for mirror effect
@@ -493,13 +537,45 @@ def main():
         gaze = None
         gaze_display = None
         blink_type = None
+        long_blink = False
         blink_processed = False
+        snap_target = None
+        brows_raised = False
+        snap_display = None
         frame_rgb = None
+        run_hand = False
+        run_face = False
+        hand_active = False
 
         if tracking_enabled:
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            detector.find_hands(frame, draw=render_enabled, rgb=frame_rgb)
-            landmarks = detector.find_position(frame)
+            run_hand, run_face = schedule_detectors(
+                movement_mode,
+                frame_id,
+                Config.BLINK_ENABLED,
+                Config.LONG_BLINK_SECONDS > 0
+                or Config.SNAP_TRIGGER_MODE == "BROWS",
+            )
+            run_face = run_face and face_tracker is not None
+            hand_active = movement_mode in (
+                "ABSOLUTE",
+                "RELATIVE",
+                "TILT_HYBRID",
+                "EYE_HAND",
+            )
+
+            if run_hand or run_face:
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            if run_face:
+                blink_type, long_blink = face_tracker.process(
+                    frame,
+                    frame_ts,
+                    rgb=frame_rgb,
+                )
+                blink_processed = True
+            if run_hand:
+                detector.find_hands(frame, draw=render_enabled, rgb=frame_rgb)
+            if run_hand or (hand_active and detector.results):
+                landmarks = detector.find_position(frame)
 
         index_tip = None
         thumb_tip = None
@@ -516,8 +592,6 @@ def main():
             index_tip
             or movement_mode in ("HEAD", "EYE_HYBRID", "EYE_HAND", "RELATIVE", "TILT_HYBRID")
         ):
-            now = frame_ts
-
             if movement_mode in ("HEAD", "EYE_HYBRID", "EYE_HAND"):
                 if face_tracker is None:
                     face_tracker = FaceBlinkDetector(
@@ -527,8 +601,6 @@ def main():
                         blink_frames=Config.BLINK_FRAMES,
                         cooldown=Config.BLINK_COOLDOWN,
                     )
-                blink_type = face_tracker.process(frame, now, rgb=frame_rgb)
-                blink_processed = True
                 head_motion.sensitivity = head_sensitivity
                 head_motion.deadzone = head_deadzone
                 head_motion.max_speed = head_speed
@@ -544,9 +616,6 @@ def main():
                         curr_x, curr_y = mouse_driver.get_last_pos()
                         x_target = curr_x + dx
                         y_target = curr_y + dy
-                    elif index_tip:
-                        x_cam, y_cam, _ = index_tip
-                        x_target, y_target = mapper.map(x_cam, y_cam)
                     else:
                         x_target, y_target = None, None
                 elif movement_mode == "EYE_HYBRID":
@@ -642,7 +711,9 @@ def main():
                 x_in = smoother_x.filter(x_target, now)
                 y_in = smoother_y.filter(y_target, now)
 
-                x_smooth, y_smooth = motion_smoother.apply(x_in, y_in, now)
+                x_smooth, y_smooth = motion_smoother.apply(
+                    x_in, y_in, now, precision=movement_mode == "HEAD"
+                )
                 # Clamp to monitor bounds
                 x_smooth = max(screen_x, min(x_smooth, screen_x + screen_w - 1))
                 y_smooth = max(screen_y, min(y_smooth, screen_y + screen_h - 1))
@@ -650,12 +721,26 @@ def main():
                 screen_coords = (x_smooth, y_smooth)
 
             # Blink Detection
-            if face_tracker and Config.ENABLE_BLINK_CLICK:
-                if not blink_processed:
-                    blink_type = face_tracker.process(frame, now, rgb=frame_rgb)
+            if face_tracker:
+                if run_face and not blink_processed:
+                    blink_type, long_blink = face_tracker.process(
+                        frame,
+                        now,
+                        rgb=frame_rgb,
+                    )
                     blink_processed = True
                 probs["blink"] = face_tracker.last_prob
+                if long_blink:
+                    center_cursor("long_blink", timestamp=now)
+                if run_face and face_tracker.last_landmarks:
+                    brows_raised = face_tracker.check_brows_raised(
+                        face_tracker.last_landmarks
+                    )
+                    if brows_raised != prev_brows_raised:
+                        event_log.add("BROWS_ON" if brows_raised else "BROWS_OFF", now)
+                        prev_brows_raised = brows_raised
 
+            if face_tracker and Config.ENABLE_BLINK_CLICK:
                 if blink_type:
                     event_log.add(f"BLINK_{blink_type}", now)
 
@@ -706,12 +791,26 @@ def main():
                         calibration_index = 0
         else:
             accelerator.reset()
+
+        snap_controller.update_active(brows_raised, now)
+        snap_pos = screen_coords if screen_coords is not None else mouse_driver.get_last_pos()
+        snap_controller.update_cursor_pos(*snap_pos)
+        snap_target = snap_controller.sync_target()
+        if snap_target is not None:
+            snap_display = (
+                (snap_target[0] - screen_x) / max(screen_w, 1),
+                (snap_target[1] - screen_y) / max(screen_h, 1),
+            )
         # Draw HUD even if disabled, but show PAUSED
         now = frame_ts
         fps = 1.0 / max(now - prev_time, 1e-6)
         prev_time = now
 
         tune = []
+        tune.append(
+            ("Snap", f"{'on' if snap_controller.enabled else 'off'}", ["S"])
+        )
+        tune.append(("Preset", f"{active_preset}", ["F6"]))
         tune.append(("Mode", f"{movement_mode}", ["0", "1", "2", "3", "4", "5"]))
         tune.append(("Accel", f"{'on' if accel_enabled else 'off'}", ["A"]))
         tune.append(("Gain", f"{accel_max_gain:.2f}", ["[", "]"]))
@@ -769,6 +868,8 @@ def main():
                 tune=tune,
                 gaze=gaze_display,
                 calibration=calibration,
+                snap_target=snap_display,
+                snap_active=snap_controller.active,
             )
 
             if mini_mode:
@@ -783,15 +884,15 @@ def main():
                 enforce_window_topmost(window_name)
             else:
                 cv2.imshow(window_name, frame)
-
-            # Keep CV2 waitKey for window interaction (ESC to quit)
-            if cv2.waitKey(1) & 0xFF == 27:
-                break
-        else:
+        # Keep CV2 waitKey for window interaction (ESC to quit)
+        if should_exit():
+            break
+        if not render_enabled:
             time.sleep(0.001)
 
     listener.stop()
     mouse_driver.stop()
+    snap_controller.stop()
     camera.release()
     cv2.destroyAllWindows()
 

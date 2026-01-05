@@ -12,6 +12,9 @@ class HeadMotion:
         micro_gain=1.8,
         stop_threshold=0.01,
         stop_hold=0.12,
+        return_brake=0.6,
+        return_brake_margin=0.01,
+        tilt_boost=0.4,
     ):
         self.screen_w, self.screen_h = screen_size
         self.origin_x, self.origin_y = screen_origin
@@ -24,14 +27,19 @@ class HeadMotion:
         self.micro_gain = float(micro_gain)
         self.stop_threshold = float(stop_threshold)
         self.stop_hold = float(stop_hold)
+        self.return_brake = float(return_brake)
+        self.return_brake_margin = float(return_brake_margin)
+        self.tilt_boost = float(tilt_boost)
         self._neutral = None
         self._last_time = None
         self._below_since = None
+        self._last_mag = None
 
     def reset(self):
         self._neutral = None
         self._last_time = None
         self._below_since = None
+        self._last_mag = None
 
     def compute(self, landmarks, timestamp):
         if not landmarks:
@@ -82,12 +90,24 @@ class HeadMotion:
             elif (timestamp - self._below_since) >= self.stop_hold:
                 # Snap neutral to current pose to help stop/hold.
                 self._neutral = (raw_dx, raw_dy)
+                self._last_mag = 0.0
                 return 0.0, 0.0
         else:
             self._below_since = None
 
-        vx = self._scale_speed(dx)
-        vy = self._scale_speed(dy)
+        mag_total = mag
+        vx = self._scale_speed(dx, abs(dx), mag_total)
+        vy = self._scale_speed(dy, abs(dy), mag_total)
+        if (
+            self._last_mag is not None
+            and mag + self.return_brake_margin < self._last_mag
+            and self._last_mag > 0.0
+        ):
+            ratio = mag / self._last_mag
+            brake = self.return_brake + (1.0 - self.return_brake) * ratio
+            vx *= brake
+            vy *= brake
+        self._last_mag = mag
         return vx * dt, vy * dt
 
     def _apply_deadzone(self, value):
@@ -96,12 +116,14 @@ class HeadMotion:
         sign = 1.0 if value > 0 else -1.0
         return sign * (abs(value) - self.deadzone)
 
-    def _scale_speed(self, value):
+    def _scale_speed(self, value, axis_mag, total_mag):
         if value == 0.0:
             return 0.0
         sign = 1.0 if value > 0 else -1.0
-        mag = min(abs(value), 1.0)
-        if mag < 0.2:
-            mag = mag * self.micro_gain
-        speed = self.min_speed + (self.max_speed - self.min_speed) * (mag ** self.exp)
+        axis_mag = min(abs(axis_mag), 1.0)
+        if axis_mag < 0.2:
+            axis_mag = axis_mag * self.micro_gain
+        speed = self.min_speed + (self.max_speed - self.min_speed) * (axis_mag ** self.exp)
+        total_mag = min(abs(total_mag), 1.0)
+        speed *= 1.0 + self.tilt_boost * total_mag
         return sign * speed

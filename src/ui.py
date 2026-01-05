@@ -61,6 +61,8 @@ class HudRenderer:
         tune=None,
         gaze=None,
         calibration=None,
+        snap_target=None,
+        snap_active=False,
     ):
         panel_h = 56
         self._begin_overlay(frame)
@@ -110,6 +112,8 @@ class HudRenderer:
             2,
             cv2.LINE_AA,
         )
+        if snap_active:
+            cv2.circle(frame, (self.w - 150, 44), 6, (255, 120, 0), -1)
 
         if coords is not None:
             x, y = coords
@@ -121,8 +125,8 @@ class HudRenderer:
                 0.55,
                 self.light,
                 1,
-            cv2.LINE_AA,
-        )
+                cv2.LINE_AA,
+            )
 
         if mode_label:
             self._draw_mode_badge(frame, mode_label, draw_panel=False, draw_text=True)
@@ -141,6 +145,8 @@ class HudRenderer:
             self._draw_gaze_dot(frame, gaze)
         if calibration:
             self._draw_calibration(frame, calibration)
+        if snap_target:
+            self._draw_snap_target(frame, snap_target)
 
         self._draw_corner_glow(frame)
 
@@ -358,6 +364,14 @@ class HudRenderer:
             2,
             cv2.LINE_AA,
         )
+
+    def _draw_snap_target(self, frame, target):
+        sx, sy = target
+        x = int(max(0, min(self.w - 1, sx * self.w)))
+        y = int(max(0, min(self.h - 1, sy * self.h)))
+        cv2.circle(frame, (x, y), 10, (255, 120, 0), 2)
+        cv2.line(frame, (x - 14, y), (x - 6, y), (255, 120, 0), 2)
+        cv2.line(frame, (x + 6, y), (x + 14, y), (255, 120, 0), 2)
 
     def _draw_keycaps(self, frame, keys, right_x, baseline_y, draw_panel=True, draw_text=True):
         pad = 6

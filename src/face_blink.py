@@ -1,5 +1,6 @@
 import importlib
 import os
+from src.blink_state import BlinkStateMachine
 from src.config import Config
 from src.model_utils import download_model
 
@@ -24,12 +25,14 @@ class FaceBlinkDetector:
         self.blink_frames = max(int(blink_frames), 1)
         self.cooldown = float(cooldown)
         self._blink_time = self.blink_frames / max(Config.BLINK_FPS_REFERENCE, 1.0)
+        self._blink_state = BlinkStateMachine(
+            blink_threshold=self.blink_threshold,
+            blink_seconds=self._blink_time,
+            cooldown=self.cooldown,
+            long_blink_seconds=Config.LONG_BLINK_SECONDS,
+        )
 
         self._frame_count = 0
-        self._closed_time = 0.0
-        self._ready = True
-        self._last_blink_time = 0.0
-        self._last_timestamp = None
         self.last_ratio = None
         self.last_prob = 0.0
         self.last_landmarks = None
@@ -40,6 +43,12 @@ class FaceBlinkDetector:
 
         self._left_eye = {"left": 33, "right": 133, "upper": 159, "lower": 145}
         self._right_eye = {"left": 362, "right": 263, "upper": 386, "lower": 374}
+        self._brow_left = 105
+        self._brow_right = 334
+        self._lid_left = 159
+        self._lid_right = 386
+        self._lower_left = 145
+        self._lower_right = 374
 
     def _ensure_model(self):
         if os.path.exists(self.model_path):
@@ -78,17 +87,15 @@ class FaceBlinkDetector:
         )
 
     def reset(self):
-        self._closed_time = 0.0
-        self._ready = True
+        self._blink_state.reset()
         self.last_ratio = None
         self.last_prob = 0.0
         self.last_landmarks = None
-        self._last_timestamp = None
 
     def process(self, frame, timestamp, rgb=None):
         if self.frame_skip and (self._frame_count % (self.frame_skip + 1)) != 0:
             self._frame_count += 1
-            return None
+            return None, False
         self._frame_count += 1
 
         rgb_frame = rgb if rgb is not None else cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -99,7 +106,7 @@ class FaceBlinkDetector:
         result = self.landmarker.detect(mp_img)
         if not result.face_landmarks:
             self.reset()
-            return None
+            return None, False
 
         landmarks = result.face_landmarks[0]
         self.last_landmarks = landmarks
@@ -110,46 +117,39 @@ class FaceBlinkDetector:
         self.last_ratio = (left_ratio + right_ratio) / 2
         self.last_prob = max(0.0, min(1.0, 1.0 - (self.last_ratio / self.blink_threshold))) # Avg prob
 
-        # Check states
-        left_closed = left_ratio < self.blink_threshold
-        right_closed = right_ratio < self.blink_threshold
-        
-        # Determine current state
-        state = None
-        if left_closed and right_closed:
-            state = 'BOTH'
-        elif left_closed:
-            state = 'LEFT'
-        elif right_closed:
-            state = 'RIGHT'
-            
-        # State Machine / Debounce
-        detected = None
-        dt = 0.0
-        if self._last_timestamp is not None:
-            dt = max(float(timestamp) - float(self._last_timestamp), 0.0)
-        self._last_timestamp = float(timestamp)
-
-        if state:
-            self._closed_time += dt
-            if self._ready and self._closed_time >= self._blink_time:
-                if (timestamp - self._last_blink_time) > self.cooldown:
-                    self._last_blink_time = timestamp
-                    self._ready = False
-                    detected = state
-        else:
-            # Reset if eyes open (hysteresis could be added here)
-            if not left_closed and not right_closed: # Wait for both to be fully open
-                 if left_ratio > self.blink_threshold * 1.1 and right_ratio > self.blink_threshold * 1.1:
-                    self._closed_time = 0.0
-                    self._ready = True
-                    
-        return detected
+        blink_type, long_blink = self._blink_state.update(
+            left_ratio,
+            right_ratio,
+            timestamp,
+        )
+        return blink_type, long_blink
 
     def _eye_ratio(self, landmarks):
         left = self._ratio_for_eye(landmarks, self._left_eye)
         right = self._ratio_for_eye(landmarks, self._right_eye)
         return (left + right) * 0.5
+
+    def brow_ratio(self, landmarks):
+        left = self._brow_gap_ratio(
+            landmarks,
+            self._brow_left,
+            self._lid_left,
+            self._left_eye["left"],
+            self._left_eye["right"],
+            self._lower_left,
+        )
+        right = self._brow_gap_ratio(
+            landmarks,
+            self._brow_right,
+            self._lid_right,
+            self._right_eye["left"],
+            self._right_eye["right"],
+            self._lower_right,
+        )
+        return (left + right) * 0.5
+
+    def check_brows_raised(self, landmarks):
+        return self.brow_ratio(landmarks) >= Config.BROWS_THRESHOLD
 
     def _ratio_for_eye(self, landmarks, idx):
         left = landmarks[idx["left"]]
@@ -162,3 +162,18 @@ class FaceBlinkDetector:
         if h <= 1e-6:
             return 1.0
         return v / h
+
+    @staticmethod
+    def _brow_gap_ratio(landmarks, brow_idx, lid_idx, left_idx, right_idx, lower_idx):
+        brow = landmarks[brow_idx]
+        lid = landmarks[lid_idx]
+        lower = landmarks[lower_idx]
+        left = landmarks[left_idx]
+        right = landmarks[right_idx]
+        eye_w = np.hypot(left.x - right.x, left.y - right.y)
+        eye_h = abs(lid.y - lower.y)
+        scale = max(eye_h, eye_w * 0.25)
+        if scale <= 1e-6:
+            return 0.0
+        gap = lid.y - brow.y
+        return max(0.0, gap / scale)

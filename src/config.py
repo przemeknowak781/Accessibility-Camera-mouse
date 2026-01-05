@@ -2,10 +2,16 @@ from dataclasses import dataclass
 
 @dataclass
 class Config:
+    # Tuning preset: "precision" (default), "balanced", "fast", "stable", "legacy"
+    PRESET_NAME: str = "precision"
+
     # Camera Settings
     CAM_WIDTH: int = 640
     CAM_HEIGHT: int = 480
     CAM_ID: int = 0
+    CAM_BACKEND: str = "auto" # "auto", "msmf", "dshow"
+    CAMERA_STALL_SECONDS: float = 1.0
+    CAMERA_RESTART_COOLDOWN: float = 2.0
     MONITOR_INDEX: int = -1
     MOUSE_BACKEND: str = "auto"  # "auto", "autopy", "pynput"
     MODEL_DOWNLOAD_TIMEOUT: float = 12.0
@@ -32,6 +38,21 @@ class Config:
     BLINK_COOLDOWN: float = 0.4
     BLINK_FRAME_SKIP: int = 2
     BLINK_INPUT_SIZE: tuple = (320, 180)
+    LONG_BLINK_SECONDS: float = 0.7 # Hold both eyes closed to center cursor
+
+    # Smart Snapping - "Gravity Well" magnetic attraction
+    SNAP_ENABLED: bool = True
+    SNAP_TRIGGER_MODE: str = "ALWAYS" # "BROWS" or "ALWAYS"
+    SNAP_RADIUS: float = 60.0  # Magnet range in pixels (from todo_snap)
+    SNAP_STRENGTH: float = 0.25  # Gentle attraction 0.0-1.0 (from todo_snap)
+    SNAP_LOCK_RADIUS: float = 8.0  # Very close = strong lock
+    SNAP_LOCK_STRENGTH: float = 0.8
+    SNAP_BREAKOUT_SPEED: float = 50.0  # Speed to break free from magnet
+    SNAP_INTERVAL: float = 0.1  # UI scan interval (from todo_snap)
+    SNAP_TARGET_HOLD_SECONDS: float = 0.5  # Short hold, target should be stable anyway
+    SNAP_TARGET_SMOOTH: float = 0.3  # Moderate smoothing
+    SNAP_BROW_HOLD_SECONDS: float = 0.5
+    BROWS_THRESHOLD: float = 1.2
     
     # Movement Settings
     MOVEMENT_MODE: str = "HEAD" # "ABSOLUTE", "RELATIVE", "TILT_HYBRID", "HEAD", "EYE_HYBRID", "EYE_HAND"
@@ -54,15 +75,22 @@ class Config:
     HEAD_SENSITIVITY: float = 6.0
     HEAD_DEADZONE: float = 0.005
     HEAD_FRAME_SKIP: int = 0
-    HEAD_SPEED_MIN: float = 140.0
+    HEAD_SPEED_MIN: float = 0.0
     HEAD_SPEED_MAX: float = 2600.0
-    HEAD_EXP: float = 0.7
+    HEAD_EXP: float = 1.6
     HEAD_NEUTRAL_ALPHA: float = 0.05
-    HEAD_MICRO_GAIN: float = 1.0
+    HEAD_MICRO_GAIN: float = 0.7
     HEAD_STOP_THRESHOLD: float = 0.030
     HEAD_STOP_HOLD: float = 0.34
     HEAD_FINE_SCALE: float = 0.35
     HAND_FINE_SCALE: float = 0.25
+    HEAD_RETURN_BRAKE: float = 0.6 # Damp return-to-neutral movement
+    HEAD_RETURN_BRAKE_MARGIN: float = 0.01
+    HEAD_TILT_BOOST: float = 0.4 # Extra speed when head tilt is large
+    HEAD_PRECISION_RADIUS: float = 16.0 # Pixels from target to tighten damping
+    HEAD_PRECISION_DAMPING: float = 0.9 # Higher damping for easier stops
+    HEAD_MICRO_RADIUS: float = 6.0 # Pixels from target for maximum precision
+    HEAD_MICRO_DAMPING: float = 0.98 # Near-snap for micro adjustments
     
     # Eye Tracking
     EYE_SMOOTH_ALPHA: float = 0.35
@@ -96,6 +124,6 @@ class Config:
     # Mouse Driver Settings
     MOUSE_REFRESH_RATE: int = 120
     MOUSE_FRICTION: float = 0.92
-    MOUSE_SPEED_COEFF: float = 15.0
+    MOUSE_SPEED_COEFF: float = 35.0
     MOUSE_OVERRIDE_DIST: float = 80.0 # Pixels moved by user to trigger override
     MOUSE_OVERRIDE_TIMEOUT: float = 1.0 # Seconds to wait before reclaiming control

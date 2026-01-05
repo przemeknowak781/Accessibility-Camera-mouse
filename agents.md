@@ -7,5 +7,5 @@
 7. Be UX-oriented, always make sure that the user experience is the best possible. Test UX, look for improvements. 
 8. If you see that your actions are resulting in a suboptimal solution or broken code, always look for a better way to implement the feature. Never implement a feature that is not optimal or does not work. 
 Try to understand the wide context of your actions - not only the immediate task, but also the long-term goals of the project. Always think if your proposed solution aligns with the project's goals and vision.   
-Work until you do everything from fixes.md perfectly
+
 
