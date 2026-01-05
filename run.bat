@@ -1,5 +1,5 @@
 @echo off
 setlocal
 cd /d %~dp0
-python main.py
+start "" /min cmd /c "python main.py"
 endlocal

@@ -1,3 +1,4 @@
+import ctypes
 import time
 import cv2
 import numpy as np
@@ -20,6 +21,66 @@ from src.relative_motion import RelativeMotion
 from src.smoother import MotionSmoother
 from src.tilt_mapper import TiltMapper
 from src.ui import HudRenderer
+
+
+def set_window_topmost(window_name, topmost=True):
+    """Set an OpenCV window to always-on-top on Windows."""
+    try:
+        hwnd = ctypes.windll.user32.FindWindowW(None, window_name)
+        if hwnd:
+            HWND_TOPMOST = -1
+            HWND_NOTOPMOST = -2
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_NOACTIVATE = 0x0010
+            SWP_SHOWWINDOW = 0x0040
+            target = HWND_TOPMOST if topmost else HWND_NOTOPMOST
+            ctypes.windll.user32.SetWindowPos(
+                hwnd,
+                target,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
+    except Exception:
+        pass
+
+
+def enforce_window_topmost(window_name):
+    try:
+        cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
+    except Exception:
+        pass
+    set_window_topmost(window_name, True)
+
+
+def get_mini_window_size(max_w=320, aspect=16 / 9):
+    max_w = max(int(max_w), 1)
+    width = max_w
+    height = max(int(round(width / aspect)), 1)
+    return width, height
+
+
+def resize_with_letterbox(frame, target_w, target_h):
+    src_h, src_w = frame.shape[:2]
+    scale = min(target_w / max(src_w, 1), target_h / max(src_h, 1))
+    new_w = max(int(round(src_w * scale)), 1)
+    new_h = max(int(round(src_h * scale)), 1)
+    resized = cv2.resize(frame, (new_w, new_h))
+    output = np.zeros((target_h, target_w, 3), dtype=frame.dtype)
+    x = (target_w - new_w) // 2
+    y = (target_h - new_h) // 2
+    output[y : y + new_h, x : x + new_w] = resized
+    return output
+
+
+def position_mini_window(window_name, screen_x, screen_y, screen_w, screen_h, win_w, win_h):
+    margin = 16
+    x = screen_x + margin
+    y = screen_y + margin
+    cv2.moveWindow(window_name, max(screen_x, x), max(screen_y, y))
 
 
 def get_monitor_layout():
@@ -175,6 +236,10 @@ def main():
     last_gaze = None
     render_enabled = Config.RENDER_ENABLED
     relative_cursor = None
+
+    mini_mode = False
+    window_name = "Handsteer"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     
     from pynput import keyboard
     
@@ -190,6 +255,7 @@ def main():
         nonlocal calibration_sampling, calibration_sample_start, calibration_sample_count
         nonlocal render_enabled
         nonlocal relative_cursor
+        nonlocal mini_mode
         if key == keyboard.Key.space:
             tracking_enabled = not tracking_enabled
             if tracking_enabled:
@@ -376,6 +442,22 @@ def main():
             if key.char in ('v', 'V'):
                 render_enabled = not render_enabled
                 print(f"Preview {'ON' if render_enabled else 'OFF'}")
+            if key.char in ('m', 'M'):
+                mini_mode = not mini_mode
+                print(f"Mini Mode {'ON' if mini_mode else 'OFF'}")
+                if mini_mode:
+                    enforce_window_topmost(window_name)
+                else:
+                    set_window_topmost(window_name, topmost=False)
+                if mini_mode:
+                    mini_w, mini_h = get_mini_window_size(max_w=320)
+                    cv2.resizeWindow(window_name, mini_w, mini_h)
+                    position_mini_window(
+                        window_name, screen_x, screen_y, screen_w, screen_h, mini_w, mini_h
+                    )
+                else:
+                    cv2.resizeWindow(window_name, cam_w, cam_h)
+                return
         except AttributeError:
             if key == keyboard.Key.enter and calibration_active:
                 if not calibration_sampling:
@@ -689,7 +771,18 @@ def main():
                 calibration=calibration,
             )
 
-            cv2.imshow('Handsteer', frame)
+            if mini_mode:
+                mini_w, mini_h = get_mini_window_size(max_w=320)
+                display_frame = resize_with_letterbox(frame, mini_w, mini_h)
+                color = (0, 255, 0) if tracking_enabled else (0, 0, 255)
+                cv2.rectangle(display_frame, (0, 0), (mini_w - 1, mini_h - 1), color, 4)
+                cv2.imshow(window_name, display_frame)
+                position_mini_window(
+                    window_name, screen_x, screen_y, screen_w, screen_h, mini_w, mini_h
+                )
+                enforce_window_topmost(window_name)
+            else:
+                cv2.imshow(window_name, frame)
 
             # Keep CV2 waitKey for window interaction (ESC to quit)
             if cv2.waitKey(1) & 0xFF == 27:
