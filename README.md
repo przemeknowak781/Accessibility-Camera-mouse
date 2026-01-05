@@ -4,6 +4,7 @@ Handsteer is a lightweight, camera‑based mouse controller designed for accessi
 
 ## Features
 - Hand cursor with smoothing and acceleration.
+- Relative hand mode for touchpad-style movement.
 - Pinch‑to‑hold for drag & drop.
 - Blink click (optional).
 - Head mode for hands‑free control.
@@ -15,6 +16,7 @@ Handsteer is a lightweight, camera‑based mouse controller designed for accessi
 - Windows 10/11
 - Python 3.10+
 - Camera (webcam)
+- Optional: `autopy` (legacy, may fail to install on newer Python versions)
 
 ## Install
 ```powershell
@@ -40,10 +42,12 @@ General:
 - `V` toggle preview on/off (headless mode)
 
 Modes:
+- `0` RELATIVE (touchpad-style hand movement)
 - `1` ABSOLUTE (hand cursor)
 - `2` HEAD (head‑only)
 - `3` EYE_HYBRID (eyes + head fine)
 - `4` EYE_HAND (eyes + hand fine)
+- `5` TILT_HYBRID (hand tilt + fine hand)
 
 Tuning (shown in HUD):
 - Accel on/off: `A`
@@ -70,10 +74,10 @@ Hand fine (eye‑hand mode):
 
 ## Eye Calibration
 In `EYE_HYBRID` or `EYE_HAND` mode:
-1) Look at **Bottom Left** → press `Enter`
-2) Look at **Bottom Right** → press `Enter`
-3) Look at **Top Right** → press `Enter`
-4) Look at **Top Left** → press `Enter`
+1) Look at **Bottom Left** → press `Enter` and hold still for ~1s
+2) Look at **Bottom Right** → press `Enter` and hold still for ~1s
+3) Look at **Top Right** → press `Enter` and hold still for ~1s
+4) Look at **Top Left** → press `Enter` and hold still for ~1s
 
 The gaze dot shows your current mapped eye position. Recalibrate anytime with `c`.
 

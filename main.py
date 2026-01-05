@@ -12,9 +12,13 @@ from src.eye_tracker import EyeTracker
 from src.face_blink import FaceBlinkDetector
 from src.head_motion import HeadMotion
 from src.hand_detector import HandDetector
+from src.hybrid_motion import HybridMotion
 from src.mapper import CoordinateMapper
+from src.mouse_driver import MouseDriver
 from src.one_euro import OneEuroFilter
+from src.relative_motion import RelativeMotion
 from src.smoother import MotionSmoother
+from src.tilt_mapper import TiltMapper
 from src.ui import HudRenderer
 
 
@@ -75,6 +79,8 @@ def main():
     mouse = MouseController(backend=backend)
     if backend == "pynput":
         mouse.set_bounds(*bounds)
+    mouse_driver = MouseDriver(mouse)
+    mouse_driver.start()
     monitor_label = Config.MONITOR_INDEX if Config.MONITOR_INDEX >= 0 else "primary"
     print(
         f"Using Monitor {monitor_label}: {screen_w}x{screen_h} @ ({screen_x},{screen_y})"
@@ -107,19 +113,36 @@ def main():
         smooth_alpha=Config.EYE_SMOOTH_ALPHA,
         gain=Config.EYE_GAIN,
         neutral_alpha=Config.EYE_NEUTRAL_ALPHA,
+        ref_fps=Config.EYE_SMOOTH_FPS_REFERENCE,
+    )
+    tilt_mapper = TiltMapper(decay=Config.TILT_DECAY, min_range=Config.TILT_MIN_RANGE)
+    hybrid_motion = HybridMotion(
+        tilt_mapper,
+        (screen_w, screen_h),
+        (screen_x, screen_y),
+        fine_scale=Config.FINE_SCALE,
+        fine_weight=Config.FINE_WEIGHT,
+        coarse_weight=Config.COARSE_WEIGHT,
     )
     
     mapper = CoordinateMapper((cam_w, cam_h), (screen_w, screen_h), Config.FRAME_MARGIN, (screen_x, screen_y))
+    relative_motion = RelativeMotion(
+        (cam_w, cam_h),
+        (screen_w, screen_h),
+        sensitivity=Config.REL_SENSITIVITY,
+    )
     
     hud = HudRenderer((cam_w, cam_h))
     event_log = EventLog(Config.EVENT_LOG_PATH, Config.EVENT_LOG_MAX)
 
     prev_time = time.time()
+    last_frame_id = None
     print("Handsteer Started. Press ESC to exit.")
 
     # Spacebar Toggle Logic
     tracking_enabled = True
     movement_mode = Config.MOVEMENT_MODE
+    mouse_driver.coast_window = Config.COAST_WINDOW if movement_mode == "RELATIVE" else 0.0
     accel_enabled = Config.ACCEL_ENABLED
     accel_max_gain = Config.ACCEL_MAX_GAIN
     accel_min_speed = Config.ACCEL_MIN_SPEED
@@ -139,6 +162,9 @@ def main():
     eye_smooth = Config.EYE_SMOOTH_ALPHA
     eye_neutral_alpha = Config.EYE_NEUTRAL_ALPHA
     calibration_active = False
+    calibration_sampling = False
+    calibration_sample_start = 0.0
+    calibration_sample_count = 0
     calibration_points = [
         ("BL", "Bottom Left", (0.1, 0.9)),
         ("BR", "Bottom Right", (0.9, 0.9)),
@@ -148,6 +174,7 @@ def main():
     calibration_index = 0
     last_gaze = None
     render_enabled = Config.RENDER_ENABLED
+    relative_cursor = None
     
     from pynput import keyboard
     
@@ -160,7 +187,9 @@ def main():
         nonlocal head_fine_scale, hand_fine_scale
         nonlocal eye_gain, eye_smooth, eye_neutral_alpha
         nonlocal calibration_active, calibration_index, last_gaze
+        nonlocal calibration_sampling, calibration_sample_start, calibration_sample_count
         nonlocal render_enabled
+        nonlocal relative_cursor
         if key == keyboard.Key.space:
             tracking_enabled = not tracking_enabled
             if tracking_enabled:
@@ -168,16 +197,37 @@ def main():
                  motion_smoother.reset()
                  accelerator.reset()
                  head_motion.reset()
+                 relative_motion.reset()
+                 relative_cursor = None
+                 mouse_driver.resume()
             else:
                  print("Paused.")
+                 mouse_driver.pause()
             return
 
         try:
+            if key.char == '0':
+                movement_mode = "RELATIVE"
+                print("Mode RELATIVE")
+                calibration_active = False
+                calibration_sampling = False
+                calibration_sample_start = 0.0
+                calibration_sample_count = 0
+                relative_motion.reset()
+                relative_cursor = None
+                mouse_driver.coast_window = Config.COAST_WINDOW
+                return
             if key.char == '1':
                 movement_mode = "ABSOLUTE"
                 print("Mode ABSOLUTE")
                 head_motion.reset()
                 calibration_active = False
+                calibration_sampling = False
+                calibration_sample_start = 0.0
+                calibration_sample_count = 0
+                relative_motion.reset()
+                relative_cursor = None
+                mouse_driver.coast_window = 0.0
                 return
             if key.char == '2':
                 movement_mode = "HEAD"
@@ -192,6 +242,12 @@ def main():
                     )
                 head_motion.reset()
                 calibration_active = False
+                calibration_sampling = False
+                calibration_sample_start = 0.0
+                calibration_sample_count = 0
+                relative_motion.reset()
+                relative_cursor = None
+                mouse_driver.coast_window = 0.0
                 return
             if key.char == '3':
                 movement_mode = "EYE_HYBRID"
@@ -209,6 +265,12 @@ def main():
                 eye_tracker.start_calibration()
                 calibration_active = True
                 calibration_index = 0
+                calibration_sampling = False
+                calibration_sample_start = 0.0
+                calibration_sample_count = 0
+                relative_motion.reset()
+                relative_cursor = None
+                mouse_driver.coast_window = 0.0
                 return
             if key.char == '4':
                 movement_mode = "EYE_HAND"
@@ -225,6 +287,24 @@ def main():
                 eye_tracker.start_calibration()
                 calibration_active = True
                 calibration_index = 0
+                calibration_sampling = False
+                calibration_sample_start = 0.0
+                calibration_sample_count = 0
+                relative_motion.reset()
+                relative_cursor = None
+                mouse_driver.coast_window = 0.0
+                return
+            if key.char == '5':
+                movement_mode = "TILT_HYBRID"
+                print("Mode TILT_HYBRID")
+                calibration_active = False
+                calibration_sampling = False
+                calibration_sample_start = 0.0
+                calibration_sample_count = 0
+                hybrid_motion.reset()
+                relative_motion.reset()
+                relative_cursor = None
+                mouse_driver.coast_window = 0.0
                 return
             if key.char in ('a', 'A'):
                 accel_enabled = not accel_enabled
@@ -286,33 +366,38 @@ def main():
                 eye_neutral_alpha = max(0.01, eye_neutral_alpha - 0.01)
             if key.char == 'w':
                 eye_neutral_alpha = min(0.3, eye_neutral_alpha + 0.01)
-            if key.char == 'c' and movement_mode == "EYE_HYBRID":
+            if key.char == 'c' and movement_mode in ("EYE_HYBRID", "EYE_HAND"):
                 eye_tracker.start_calibration()
                 calibration_active = True
                 calibration_index = 0
+                calibration_sampling = False
+                calibration_sample_start = 0.0
+                calibration_sample_count = 0
             if key.char in ('v', 'V'):
                 render_enabled = not render_enabled
                 print(f"Preview {'ON' if render_enabled else 'OFF'}")
         except AttributeError:
             if key == keyboard.Key.enter and calibration_active:
-                if last_gaze is not None:
-                    label, _, _ = calibration_points[calibration_index]
-                    eye_tracker.add_calibration_sample(label, last_gaze)
-                    calibration_index += 1
-                    if calibration_index >= len(calibration_points):
-                        calibration_active = not eye_tracker.finish_calibration()
-                        calibration_index = 0
+                if not calibration_sampling:
+                    calibration_sampling = True
+                    calibration_sample_start = time.time()
+                    calibration_sample_count = 0
             return
 
     listener = keyboard.Listener(on_press=on_key_press)
     listener.start()
 
     while True:
-        success, frame = camera.read()
+        success, frame, frame_id, frame_time = camera.read()
         if not success:
             # If camera is just starting up, it might send None
             time.sleep(0.01)
             continue
+        if frame_id == last_frame_id:
+            time.sleep(0.001)
+            continue
+        last_frame_id = frame_id
+        frame_ts = frame_time if frame_time is not None else time.time()
 
         # MediaPipe expects RGB, but we work in BGR for OpenCV
         # Flipping for mirror effect
@@ -326,9 +411,12 @@ def main():
         gaze = None
         gaze_display = None
         blink_type = None
+        blink_processed = False
+        frame_rgb = None
 
         if tracking_enabled:
-            detector.find_hands(frame, draw=True)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            detector.find_hands(frame, draw=render_enabled, rgb=frame_rgb)
             landmarks = detector.find_position(frame)
 
         index_tip = None
@@ -342,8 +430,11 @@ def main():
             elif idx == 4:
                 thumb_tip = (x, y, z)
 
-        if tracking_enabled and (index_tip or movement_mode in ("HEAD", "EYE_HYBRID", "EYE_HAND")):
-            now = time.time()
+        if tracking_enabled and (
+            index_tip
+            or movement_mode in ("HEAD", "EYE_HYBRID", "EYE_HAND", "RELATIVE", "TILT_HYBRID")
+        ):
+            now = frame_ts
 
             if movement_mode in ("HEAD", "EYE_HYBRID", "EYE_HAND"):
                 if face_tracker is None:
@@ -354,7 +445,8 @@ def main():
                         blink_frames=Config.BLINK_FRAMES,
                         cooldown=Config.BLINK_COOLDOWN,
                     )
-                blink_type = face_tracker.process(frame, now)
+                blink_type = face_tracker.process(frame, now, rgb=frame_rgb)
+                blink_processed = True
                 head_motion.sensitivity = head_sensitivity
                 head_motion.deadzone = head_deadzone
                 head_motion.max_speed = head_speed
@@ -367,7 +459,7 @@ def main():
                 if movement_mode == "HEAD":
                     if delta is not None:
                         dx, dy = delta
-                        curr_x, curr_y = mouse.get_position()
+                        curr_x, curr_y = mouse_driver.get_last_pos()
                         x_target = curr_x + dx
                         y_target = curr_y + dy
                     elif index_tip:
@@ -379,17 +471,24 @@ def main():
                     eye_tracker.gain = eye_gain
                     eye_tracker.smooth_alpha = eye_smooth
                     eye_tracker.neutral_alpha = eye_neutral_alpha
-                    gaze = eye_tracker.compute(face_tracker.last_landmarks)
+                    gaze = eye_tracker.compute(face_tracker.last_landmarks, now)
                     last_gaze = gaze
                     if gaze is not None:
                         mapped = eye_tracker.map_to_screen(gaze)
                         gx, gy = mapped if mapped is not None else gaze
                         gaze_display = (gx, gy)
-                        x_target = screen_x + gx * screen_w
-                        y_target = screen_y + gy * screen_h
+                        base_x = screen_x + gx * screen_w
+                        base_y = screen_y + gy * screen_h
+                        if delta is not None:
+                            dx, dy = delta
+                            x_target = base_x + dx * head_fine_scale
+                            y_target = base_y + dy * head_fine_scale
+                        else:
+                            x_target = base_x
+                            y_target = base_y
                     elif delta is not None:
                         dx, dy = delta
-                        curr_x, curr_y = mouse.get_position()
+                        curr_x, curr_y = mouse_driver.get_last_pos()
                         x_target = curr_x + dx
                         y_target = curr_y + dy
                     else:
@@ -398,7 +497,7 @@ def main():
                     eye_tracker.gain = eye_gain
                     eye_tracker.smooth_alpha = eye_smooth
                     eye_tracker.neutral_alpha = eye_neutral_alpha
-                    gaze = eye_tracker.compute(face_tracker.last_landmarks)
+                    gaze = eye_tracker.compute(face_tracker.last_landmarks, now)
                     last_gaze = gaze
                     if gaze is not None:
                         mapped = eye_tracker.map_to_screen(gaze)
@@ -413,6 +512,33 @@ def main():
                             y_target += (hand_y - (screen_y + screen_h * 0.5)) * hand_fine_scale
                     else:
                         x_target, y_target = None, None
+            elif movement_mode == "RELATIVE":
+                if relative_cursor is None:
+                    curr_x, curr_y = mouse_driver.get_last_pos()
+                    relative_cursor = [float(curr_x), float(curr_y)]
+                hand_pos = None
+                if index_tip:
+                    hand_pos = (index_tip[0], index_tip[1])
+                delta = relative_motion.update(hand_pos)
+                if delta is not None:
+                    dx, dy = delta
+                    relative_cursor[0] += dx
+                    relative_cursor[1] += dy
+                    relative_cursor[0] = max(
+                        screen_x, min(relative_cursor[0], screen_x + screen_w - 1)
+                    )
+                    relative_cursor[1] = max(
+                        screen_y, min(relative_cursor[1], screen_y + screen_h - 1)
+                    )
+                    x_target, y_target = relative_cursor[0], relative_cursor[1]
+                else:
+                    x_target, y_target = None, None
+            elif movement_mode == "TILT_HYBRID":
+                tilt_target = hybrid_motion.compute(landmarks, (cam_w, cam_h))
+                if tilt_target is not None:
+                    x_target, y_target = tilt_target
+                else:
+                    x_target, y_target = None, None
             else:
                 x_cam, y_cam, _ = index_tip
                 x_target, y_target = mapper.map(x_cam, y_cam)
@@ -438,13 +564,14 @@ def main():
                 # Clamp to monitor bounds
                 x_smooth = max(screen_x, min(x_smooth, screen_x + screen_w - 1))
                 y_smooth = max(screen_y, min(y_smooth, screen_y + screen_h - 1))
-                mouse.move(x_smooth, y_smooth)
+                mouse_driver.update_target(x_smooth, y_smooth, timestamp=now)
                 screen_coords = (x_smooth, y_smooth)
 
             # Blink Detection
             if face_tracker and Config.ENABLE_BLINK_CLICK:
-                if movement_mode not in ("HEAD", "EYE_HYBRID"):
-                    blink_type = face_tracker.process(frame, now)
+                if not blink_processed:
+                    blink_type = face_tracker.process(frame, now, rgb=frame_rgb)
+                    blink_processed = True
                 probs["blink"] = face_tracker.last_prob
 
                 if blink_type:
@@ -478,15 +605,32 @@ def main():
 
                 # OR logic: Click if Blink OR pinch drag active
                 click_active = click_active or drag_active
+
+            if calibration_active and calibration_sampling:
+                if last_gaze is not None:
+                    label, _, _ = calibration_points[calibration_index]
+                    eye_tracker.add_calibration_sample(label, last_gaze)
+                    calibration_sample_count += 1
+
+                elapsed = now - calibration_sample_start
+                if (
+                    elapsed >= Config.EYE_CALIBRATION_SECONDS
+                    and calibration_sample_count >= Config.EYE_CALIBRATION_MIN_SAMPLES
+                ):
+                    calibration_sampling = False
+                    calibration_index += 1
+                    if calibration_index >= len(calibration_points):
+                        calibration_active = not eye_tracker.finish_calibration()
+                        calibration_index = 0
         else:
             accelerator.reset()
         # Draw HUD even if disabled, but show PAUSED
-        now = time.time()
+        now = frame_ts
         fps = 1.0 / max(now - prev_time, 1e-6)
         prev_time = now
 
         tune = []
-        tune.append(("Mode", f"{movement_mode}", ["1", "2", "3", "4"]))
+        tune.append(("Mode", f"{movement_mode}", ["0", "1", "2", "3", "4", "5"]))
         tune.append(("Accel", f"{'on' if accel_enabled else 'off'}", ["A"]))
         tune.append(("Gain", f"{accel_max_gain:.2f}", ["[", "]"]))
         if movement_mode == "HEAD":
@@ -499,6 +643,7 @@ def main():
             tune.append(("StopTh", f"{head_stop_threshold:.3f}", ["j", "k"]))
             tune.append(("StopHold", f"{head_stop_hold:.2f}", ["o", "p"]))
         if movement_mode == "EYE_HYBRID":
+            tune.append(("HeadFine", f"{head_fine_scale:.2f}", ["t", "y"]))
             tune.append(("EyeGain", f"{eye_gain:.2f}", ["v", "b"]))
             tune.append(("EyeSmooth", f"{eye_smooth:.2f}", ["f", "g"]))
             tune.append(("EyeNeutral", f"{eye_neutral_alpha:.2f}", ["q", "w"]))
@@ -511,9 +656,23 @@ def main():
             # MinGain removed (HEAD_MIN_GAIN no longer used)
 
         calibration = None
-        if calibration_active and movement_mode == "EYE_HYBRID":
-            label, name, target = calibration_points[calibration_index]
-            calibration = (name, target, calibration_index + 1, len(calibration_points))
+        if calibration_active and movement_mode in ("EYE_HYBRID", "EYE_HAND"):
+            _, name, target = calibration_points[calibration_index]
+            status = None
+            if calibration_sampling:
+                elapsed = now - calibration_sample_start
+                remaining = max(0.0, Config.EYE_CALIBRATION_SECONDS - elapsed)
+                status = (
+                    f"Hold still on {name}: {remaining:.1f}s "
+                    f"({calibration_sample_count}/{Config.EYE_CALIBRATION_MIN_SAMPLES})"
+                )
+            calibration = (
+                name,
+                target,
+                calibration_index + 1,
+                len(calibration_points),
+                status,
+            )
 
         if render_enabled:
             hud.draw_hud(
@@ -539,6 +698,7 @@ def main():
             time.sleep(0.001)
 
     listener.stop()
+    mouse_driver.stop()
     camera.release()
     cv2.destroyAllWindows()
 

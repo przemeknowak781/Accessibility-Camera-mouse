@@ -11,12 +11,42 @@ class HudRenderer:
         self.accent_2 = Config.COLOR_ACCENT_2
         self.dark = Config.COLOR_DARK
         self.light = Config.COLOR_LIGHT
+        self._overlay = None
+        self._alpha = None
+
+    def _begin_overlay(self, frame):
+        self._overlay = np.zeros_like(frame, dtype=np.uint8)
+        self._alpha = np.zeros(frame.shape[:2], dtype=np.float32)
+
+    def _apply_overlay(self, frame):
+        if self._overlay is None or self._alpha is None:
+            return
+        if np.any(self._alpha):
+            alpha = self._alpha[..., None]
+            frame[:] = (frame * (1 - alpha) + self._overlay * alpha).astype(frame.dtype)
+        self._overlay = None
+        self._alpha = None
 
     def _blend_panel(self, frame, rect, color, alpha=0.75):
         x1, y1, x2, y2 = rect
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
-        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+        if self._overlay is None or self._alpha is None:
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
+            cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+            return
+
+        h, w = self._alpha.shape
+        x1 = max(0, min(x1, w - 1))
+        x2 = max(0, min(x2, w - 1))
+        y1 = max(0, min(y1, h - 1))
+        y2 = max(0, min(y2, h - 1))
+        if x2 < x1 or y2 < y1:
+            return
+
+        cv2.rectangle(self._overlay, (x1, y1), (x2, y2), color, -1)
+        self._alpha[y1 : y2 + 1, x1 : x2 + 1] = np.maximum(
+            self._alpha[y1 : y2 + 1, x1 : x2 + 1], alpha
+        )
 
     def draw_hud(
         self,
@@ -33,7 +63,17 @@ class HudRenderer:
         calibration=None,
     ):
         panel_h = 56
+        self._begin_overlay(frame)
         self._blend_panel(frame, (16, 16, self.w - 16, 16 + panel_h), self.dark, 0.75)
+        if mode_label:
+            self._draw_mode_badge(frame, mode_label, draw_panel=True, draw_text=False)
+        if tune:
+            self._draw_tuning(frame, tune, draw_panel=True, draw_text=False)
+        if probs:
+            self._draw_probs(frame, probs, draw_panel=True, draw_text=False)
+        if events:
+            self._draw_events(frame, events, draw_panel=True, draw_text=False)
+        self._apply_overlay(frame)
 
         cv2.putText(
             frame,
@@ -81,18 +121,18 @@ class HudRenderer:
                 0.55,
                 self.light,
                 1,
-                cv2.LINE_AA,
-            )
+            cv2.LINE_AA,
+        )
 
         if mode_label:
-            self._draw_mode_badge(frame, mode_label)
+            self._draw_mode_badge(frame, mode_label, draw_panel=False, draw_text=True)
         if tune:
-            self._draw_tuning(frame, tune)
+            self._draw_tuning(frame, tune, draw_panel=False, draw_text=True)
 
         if probs:
-            self._draw_probs(frame, probs)
+            self._draw_probs(frame, probs, draw_panel=False, draw_text=True)
         if events:
-            self._draw_events(frame, events)
+            self._draw_events(frame, events, draw_panel=False, draw_text=True)
 
         if paused:
             self._draw_paused(frame)
@@ -104,12 +144,15 @@ class HudRenderer:
 
         self._draw_corner_glow(frame)
 
-    def _draw_probs(self, frame, probs):
+    def _draw_probs(self, frame, probs, draw_panel=True, draw_text=True):
         panel_w = 220
         panel_h = 86
         x1, y1 = 16, 86
         x2, y2 = x1 + panel_w, y1 + panel_h
-        self._blend_panel(frame, (x1, y1, x2, y2), self.dark, 0.7)
+        if draw_panel:
+            self._blend_panel(frame, (x1, y1, x2, y2), self.dark, 0.7)
+        if not draw_text:
+            return
 
         cv2.putText(
             frame,
@@ -141,12 +184,15 @@ class HudRenderer:
             )
             y += 18
 
-    def _draw_events(self, frame, events):
+    def _draw_events(self, frame, events, draw_panel=True, draw_text=True):
         panel_w = 300
         panel_h = 130
         x1, y1 = 16, self.h - panel_h - 16
         x2, y2 = x1 + panel_w, y1 + panel_h
-        self._blend_panel(frame, (x1, y1, x2, y2), self.dark, 0.72)
+        if draw_panel:
+            self._blend_panel(frame, (x1, y1, x2, y2), self.dark, 0.72)
+        if not draw_text:
+            return
 
         cv2.putText(
             frame,
@@ -173,69 +219,81 @@ class HudRenderer:
             )
             y += 16
 
-    def _draw_tuning(self, frame, tune):
+    def _draw_tuning(self, frame, tune, draw_panel=True, draw_text=True):
         panel_w = 380
         panel_h = 46 + max(len(tune), 1) * 22
         x1, y1 = self.w - panel_w - 16, 86
         x2, y2 = x1 + panel_w, y1 + panel_h
-        self._blend_panel(frame, (x1, y1, x2, y2), self.dark, 0.7)
+        if draw_panel:
+            self._blend_panel(frame, (x1, y1, x2, y2), self.dark, 0.7)
 
-        cv2.putText(
-            frame,
-            "Quick Controls",
-            (x1 + 12, y1 + 28),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            self.light,
-            1,
-            cv2.LINE_AA,
-        )
+        if draw_text:
+            cv2.putText(
+                frame,
+                "Quick Controls",
+                (x1 + 12, y1 + 28),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                self.light,
+                1,
+                cv2.LINE_AA,
+            )
 
-        cv2.line(frame, (x1 + 10, y1 + 36), (x2 - 10, y1 + 36), self.accent, 1)
+            cv2.line(frame, (x1 + 10, y1 + 36), (x2 - 10, y1 + 36), self.accent, 1)
 
         y = y1 + 60
         for item in tune:
             label = item[0]
             value = item[1]
             keys = item[2] if len(item) > 2 else []
-            cv2.putText(
-                frame,
-                f"{label}",
-                (x1 + 10, y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                self.light,
-                1,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                frame,
-                f"{value}",
-                (x1 + 120, y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                self.accent,
-                1,
-                cv2.LINE_AA,
-            )
+            if draw_text:
+                cv2.putText(
+                    frame,
+                    f"{label}",
+                    (x1 + 10, y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    self.light,
+                    1,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    frame,
+                    f"{value}",
+                    (x1 + 120, y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    self.accent,
+                    1,
+                    cv2.LINE_AA,
+                )
             if keys:
-                self._draw_keycaps(frame, keys, x2 - 12, y - 12)
+                self._draw_keycaps(
+                    frame,
+                    keys,
+                    x2 - 12,
+                    y - 12,
+                    draw_panel=draw_panel,
+                    draw_text=draw_text,
+                )
             y += 22
 
-    def _draw_mode_badge(self, frame, mode_label):
+    def _draw_mode_badge(self, frame, mode_label, draw_panel=True, draw_text=True):
         text = f"MODE {mode_label}"
         x1, y1, x2, y2 = self.w - 280, 16, self.w - 16, 56
-        self._blend_panel(frame, (x1, y1, x2, y2), self.dark, 0.8)
-        cv2.putText(
-            frame,
-            text,
-            (x1 + 16, y2 - 12),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            self.accent,
-            2,
-            cv2.LINE_AA,
-        )
+        if draw_panel:
+            self._blend_panel(frame, (x1, y1, x2, y2), self.dark, 0.8)
+        if draw_text:
+            cv2.putText(
+                frame,
+                text,
+                (x1 + 16, y2 - 12),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                self.accent,
+                2,
+                cv2.LINE_AA,
+            )
 
     def _draw_paused(self, frame):
         cv2.putText(
@@ -277,7 +335,8 @@ class HudRenderer:
         cv2.circle(frame, (x, y), 12, self.accent_2, 1)
 
     def _draw_calibration(self, frame, calibration):
-        name, target, step, total = calibration
+        name, target, step, total = calibration[:4]
+        status = calibration[4] if len(calibration) > 4 else None
         tx = int(target[0] * self.w)
         ty = int(target[1] * self.h)
 
@@ -285,7 +344,10 @@ class HudRenderer:
         cv2.circle(frame, (tx, ty), 12, self.accent, -1)
         cv2.circle(frame, (tx, ty), 24, self.accent_2, 2)
 
-        text = f"Look at {name} and press ENTER ({step}/{total})"
+        if status:
+            text = f"{status} ({step}/{total})"
+        else:
+            text = f"Look at {name} and press ENTER ({step}/{total})"
         cv2.putText(
             frame,
             text,
@@ -297,7 +359,7 @@ class HudRenderer:
             cv2.LINE_AA,
         )
 
-    def _draw_keycaps(self, frame, keys, right_x, baseline_y):
+    def _draw_keycaps(self, frame, keys, right_x, baseline_y, draw_panel=True, draw_text=True):
         pad = 6
         gap = 6
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -313,18 +375,20 @@ class HudRenderer:
             y1 = baseline_y - h - 2
             x2 = x
             y2 = y1 + box_h
-            self._blend_panel(frame, (x1, y1, x2, y2), (40, 46, 60), 0.85)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (90, 100, 120), 1)
-            cv2.putText(
-                frame,
-                key,
-                (x1 + pad, y2 - pad),
-                font,
-                scale,
-                self.light,
-                thickness,
-                cv2.LINE_AA,
-            )
+            if draw_panel:
+                self._blend_panel(frame, (x1, y1, x2, y2), (40, 46, 60), 0.85)
+            if draw_text:
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (90, 100, 120), 1)
+                cv2.putText(
+                    frame,
+                    key,
+                    (x1 + pad, y2 - pad),
+                    font,
+                    scale,
+                    self.light,
+                    thickness,
+                    cv2.LINE_AA,
+                )
             x = x1 - gap
 
     def _draw_corner_glow(self, frame):

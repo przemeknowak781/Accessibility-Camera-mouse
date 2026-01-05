@@ -1,7 +1,8 @@
 import cv2
 import importlib
 import os
-import urllib.request
+from src.config import Config
+from src.model_utils import download_model
 
 
 class HandDetector:
@@ -32,7 +33,8 @@ class HandDetector:
             "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
             "hand_landmarker/float16/1/hand_landmarker.task"
         )
-        urllib.request.urlretrieve(url, self.model_path)
+        print("Downloading hand model...")
+        download_model(url, self.model_path, timeout=Config.MODEL_DOWNLOAD_TIMEOUT)
 
     def _load_modules(self):
         self.mp_image = importlib.import_module(
@@ -66,9 +68,9 @@ class HandDetector:
             options
         )
 
-    def find_hands(self, frame, draw=True):
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_img = self.mp_image.Image(self.mp_image.ImageFormat.SRGB, rgb)
+    def find_hands(self, frame, draw=True, rgb=None):
+        rgb_frame = rgb if rgb is not None else cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_img = self.mp_image.Image(self.mp_image.ImageFormat.SRGB, rgb_frame)
         self.results = self.landmarker.detect(mp_img)
         if draw and self.results.hand_landmarks:
             self._draw_landmarks(frame, self.results.hand_landmarks)

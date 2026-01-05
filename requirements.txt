@@ -1,6 +1,5 @@
 opencv-python
 mediapipe
 numpy
-autopy
 pynput
 screeninfo

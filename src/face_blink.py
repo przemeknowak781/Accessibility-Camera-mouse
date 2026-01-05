@@ -1,6 +1,7 @@
 import importlib
 import os
-import urllib.request
+from src.config import Config
+from src.model_utils import download_model
 
 import cv2
 import numpy as np
@@ -22,11 +23,13 @@ class FaceBlinkDetector:
         self.blink_threshold = float(blink_threshold)
         self.blink_frames = max(int(blink_frames), 1)
         self.cooldown = float(cooldown)
+        self._blink_time = self.blink_frames / max(Config.BLINK_FPS_REFERENCE, 1.0)
 
         self._frame_count = 0
-        self._closed_frames = 0
+        self._closed_time = 0.0
         self._ready = True
         self._last_blink_time = 0.0
+        self._last_timestamp = None
         self.last_ratio = None
         self.last_prob = 0.0
         self.last_landmarks = None
@@ -46,7 +49,8 @@ class FaceBlinkDetector:
             "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
             "face_landmarker/float16/1/face_landmarker.task"
         )
-        urllib.request.urlretrieve(url, self.model_path)
+        print("Downloading face model...")
+        download_model(url, self.model_path, timeout=Config.MODEL_DOWNLOAD_TIMEOUT)
 
     def _load_modules(self):
         self.mp_image = importlib.import_module(
@@ -74,23 +78,24 @@ class FaceBlinkDetector:
         )
 
     def reset(self):
-        self._closed_frames = 0
+        self._closed_time = 0.0
         self._ready = True
         self.last_ratio = None
         self.last_prob = 0.0
         self.last_landmarks = None
+        self._last_timestamp = None
 
-    def process(self, frame, timestamp):
+    def process(self, frame, timestamp, rgb=None):
         if self.frame_skip and (self._frame_count % (self.frame_skip + 1)) != 0:
             self._frame_count += 1
             return None
         self._frame_count += 1
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rgb_frame = rgb if rgb is not None else cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         if self.input_size:
-            rgb = cv2.resize(rgb, self.input_size, interpolation=cv2.INTER_AREA)
+            rgb_frame = cv2.resize(rgb_frame, self.input_size, interpolation=cv2.INTER_AREA)
 
-        mp_img = self.mp_image.Image(self.mp_image.ImageFormat.SRGB, rgb)
+        mp_img = self.mp_image.Image(self.mp_image.ImageFormat.SRGB, rgb_frame)
         result = self.landmarker.detect(mp_img)
         if not result.face_landmarks:
             self.reset()
@@ -120,11 +125,15 @@ class FaceBlinkDetector:
             
         # State Machine / Debounce
         detected = None
+        dt = 0.0
+        if self._last_timestamp is not None:
+            dt = max(float(timestamp) - float(self._last_timestamp), 0.0)
+        self._last_timestamp = float(timestamp)
+
         if state:
-            self._closed_frames += 1
-            if self._ready and self._closed_frames >= self.blink_frames:
+            self._closed_time += dt
+            if self._ready and self._closed_time >= self._blink_time:
                 if (timestamp - self._last_blink_time) > self.cooldown:
-                    # Valid Trigger
                     self._last_blink_time = timestamp
                     self._ready = False
                     detected = state
@@ -132,7 +141,7 @@ class FaceBlinkDetector:
             # Reset if eyes open (hysteresis could be added here)
             if not left_closed and not right_closed: # Wait for both to be fully open
                  if left_ratio > self.blink_threshold * 1.1 and right_ratio > self.blink_threshold * 1.1:
-                    self._closed_frames = 0
+                    self._closed_time = 0.0
                     self._ready = True
                     
         return detected

@@ -8,6 +8,7 @@ class Config:
     CAM_ID: int = 0
     MONITOR_INDEX: int = -1
     MOUSE_BACKEND: str = "auto"  # "auto", "autopy", "pynput"
+    MODEL_DOWNLOAD_TIMEOUT: float = 12.0
     
     # Mapper Settings
     FRAME_MARGIN: int = 100
@@ -26,7 +27,8 @@ class Config:
     BLINK_ENABLED: bool = True
     BLINK_THRESHOLD: float = 0.22 # For double blink detection
     WINK_THRESHOLD: float = 0.22 # For single eye wink
-    BLINK_FRAMES: int = 2
+    BLINK_FRAMES: int = 2 # Min closed duration in frames at BLINK_FPS_REFERENCE
+    BLINK_FPS_REFERENCE: float = 60.0
     BLINK_COOLDOWN: float = 0.4
     BLINK_FRAME_SKIP: int = 2
     BLINK_INPUT_SIZE: tuple = (320, 180)
@@ -66,6 +68,9 @@ class Config:
     EYE_SMOOTH_ALPHA: float = 0.35
     EYE_GAIN: float = 2.2
     EYE_NEUTRAL_ALPHA: float = 0.05
+    EYE_SMOOTH_FPS_REFERENCE: float = 60.0
+    EYE_CALIBRATION_SECONDS: float = 1.2
+    EYE_CALIBRATION_MIN_SAMPLES: int = 20
 
     # Rendering
     RENDER_ENABLED: bool = True

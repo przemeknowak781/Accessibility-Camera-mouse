@@ -1,11 +1,18 @@
+import time
+
+
 class EyeTracker:
-    def __init__(self, smooth_alpha=0.35, gain=2.2, neutral_alpha=0.05):
+    def __init__(
+        self, smooth_alpha=0.35, gain=2.2, neutral_alpha=0.05, ref_fps=60.0
+    ):
         self.smooth_alpha = float(smooth_alpha)
         self.gain = float(gain)
         self.neutral_alpha = float(neutral_alpha)
+        self._ref_dt = 1.0 / max(float(ref_fps), 1.0)
         self._x = None
         self._y = None
         self._neutral = None
+        self._last_time = None
         self.calibrated = False
         self._calibration = {}
         self._map = None
@@ -29,6 +36,7 @@ class EyeTracker:
         self._x = None
         self._y = None
         self._neutral = None
+        self._last_time = None
         self.calibrated = False
         self._calibration = {}
         self._map = None
@@ -82,7 +90,7 @@ class EyeTracker:
         gy = max(0.0, min(1.0, gy))
         return gx, gy
 
-    def compute(self, landmarks):
+    def compute(self, landmarks, timestamp=None):
         if not landmarks:
             return None
 
@@ -102,14 +110,22 @@ class EyeTracker:
         gx = max(0.0, min(1.0, gx))
         gy = max(0.0, min(1.0, gy))
 
+        now = time.time() if timestamp is None else float(timestamp)
+        if self._last_time is None:
+            self._last_time = now
+
         if self._neutral is None:
             self._neutral = (gx, gy)
             self._x, self._y = 0.5, 0.5
             return self._x, self._y
 
+        dt = max(now - self._last_time, 1e-6)
+        self._last_time = now
+        neutral_alpha = 1.0 - (1.0 - self.neutral_alpha) ** (dt / self._ref_dt)
+
         self._neutral = (
-            self._neutral[0] * (1.0 - self.neutral_alpha) + gx * self.neutral_alpha,
-            self._neutral[1] * (1.0 - self.neutral_alpha) + gy * self.neutral_alpha,
+            self._neutral[0] * (1.0 - neutral_alpha) + gx * neutral_alpha,
+            self._neutral[1] * (1.0 - neutral_alpha) + gy * neutral_alpha,
         )
 
         gx = 0.5 + (gx - self._neutral[0]) * self.gain
@@ -120,7 +136,7 @@ class EyeTracker:
         if self._x is None:
             self._x, self._y = gx, gy
         else:
-            a = self.smooth_alpha
+            a = 1.0 - (1.0 - self.smooth_alpha) ** (dt / self._ref_dt)
             self._x = self._x * (1.0 - a) + gx * a
             self._y = self._y * (1.0 - a) + gy * a
         return self._x, self._y

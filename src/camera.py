@@ -9,6 +9,8 @@ class ThreadedCamera:
         self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         
         self.success, self.frame = self.capture.read()
+        self.frame_id = 0
+        self.frame_time = time.time() if self.success else None
         self.av_fps = 0
         self.stopped = False
         self.lock = threading.Lock()
@@ -28,6 +30,8 @@ class ThreadedCamera:
                 if success:
                     self.success = success
                     self.frame = frame
+                    self.frame_id += 1
+                    self.frame_time = time.time()
                 else:
                     self.stopped = True
             
@@ -46,7 +50,8 @@ class ThreadedCamera:
 
     def read(self):
         with self.lock:
-            return self.success, self.frame.copy() if self.frame is not None else None
+            frame = self.frame.copy() if self.frame is not None else None
+            return self.success, frame, self.frame_id, self.frame_time
 
     def release(self):
         self.stopped = True

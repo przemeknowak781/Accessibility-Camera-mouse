@@ -27,8 +27,9 @@ I have updated the application to support **Relative Movement** (like a touchpad
 
 ## Usage Guide
 1.  **Start:** Run `run.bat`.
-2.  **Move:** Relax your hand. Move it slightly to push the cursor.
-3.  **Click:** Wink one eye OR pinch fingers.
+2.  **Mode:** Press `0` for RELATIVE or `1` for ABSOLUTE.
+3.  **Move:** Relax your hand. Move it slightly to push the cursor.
+4.  **Click:** Wink one eye OR pinch fingers.
 
 ## Toggles (in `src/config.py`)
 To customize:
