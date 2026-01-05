@@ -43,14 +43,14 @@ class Config:
     # Smart Snapping - "Gravity Well" magnetic attraction
     SNAP_ENABLED: bool = True
     SNAP_TRIGGER_MODE: str = "ALWAYS" # "BROWS" or "ALWAYS"
-    SNAP_RADIUS: float = 60.0  # Magnet range in pixels (from todo_snap)
-    SNAP_STRENGTH: float = 0.25  # Gentle attraction 0.0-1.0 (from todo_snap)
-    SNAP_LOCK_RADIUS: float = 8.0  # Very close = strong lock
-    SNAP_LOCK_STRENGTH: float = 0.8
-    SNAP_BREAKOUT_SPEED: float = 50.0  # Speed to break free from magnet
-    SNAP_INTERVAL: float = 0.1  # UI scan interval (from todo_snap)
-    SNAP_TARGET_HOLD_SECONDS: float = 0.5  # Short hold, target should be stable anyway
-    SNAP_TARGET_SMOOTH: float = 0.3  # Moderate smoothing
+    SNAP_RADIUS: float = 80.0  # Larger magnet range
+    SNAP_STRENGTH: float = 0.5  # Stronger attraction (was 0.25)
+    SNAP_LOCK_RADIUS: float = 12.0  # Lock when very close
+    SNAP_LOCK_STRENGTH: float = 0.9
+    SNAP_BREAKOUT_SPEED: float = 60.0  # Speed to break free
+    SNAP_INTERVAL: float = 0.08  # Faster scanning
+    SNAP_TARGET_HOLD_SECONDS: float = 0.4
+    SNAP_TARGET_SMOOTH: float = 0.4
     SNAP_BROW_HOLD_SECONDS: float = 0.5
     BROWS_THRESHOLD: float = 1.2
     

@@ -1,5 +1,17 @@
 import time
 import cv2
+import ctypes
+import os
+
+# Enable DPI awareness as early as possible
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(1) # PROCESS_SYSTEM_DPI_AWARE
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
 from src.config import Config
 from src.camera import ThreadedCamera
 from src.controller import MouseController
@@ -18,7 +30,6 @@ from src.camera_watchdog import is_camera_stalled
 from src.presets import apply_preset, next_preset_name
 from src.relative_motion import RelativeMotion
 from src.snap_controller import SnapController
-from src.snap_overlay import SnapOverlay
 from src.smoother import MotionSmoother
 from src.tilt_mapper import TiltMapper
 from src.ui import HudRenderer
@@ -137,8 +148,9 @@ def main():
     hud = HudRenderer((cam_w, cam_h))
     event_log = EventLog(Config.EVENT_LOG_PATH, Config.EVENT_LOG_MAX)
     
-    # Create snap overlay for visual debugging
-    snap_overlay = SnapOverlay()
+    # GDI overlay for snap target visualization
+    from src.snap_overlay import GDIOverlay
+    snap_overlay = GDIOverlay()
     snap_overlay.start()
     
     snap_controller = SnapController(mouse_driver, event_log, overlay=snap_overlay)
@@ -893,6 +905,7 @@ def main():
     listener.stop()
     mouse_driver.stop()
     snap_controller.stop()
+    snap_overlay.stop()
     camera.release()
     cv2.destroyAllWindows()
 

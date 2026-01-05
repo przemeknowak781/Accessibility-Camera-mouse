@@ -93,6 +93,10 @@ class SnapController:
             self.event_log.add("SNAP_TARGET")
             self._last_logged = target
 
+        # Update overlay visualization
+        if self._overlay:
+            self._overlay.set_target(target)
+            
         self.mouse_driver.set_snap_target(target)
         return target
 

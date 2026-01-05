@@ -8,6 +8,7 @@ Handsteer is a lightweight, camera-based mouse controller for accessibility. It 
 - Pinch-to-hold drag and blink click.
 - Head-only mode and eye+head / eye+hand hybrids.
 - Smart snapping (UIA-based magnet to clickable targets).
+- Snap target marker overlay (always-on-top crosshair).
 - Presets for different precision/speed profiles.
 - On-screen HUD with live tuning.
 - Mini always-on-top preview for throttling-safe mode.
@@ -85,7 +86,7 @@ Press `F6` to cycle presets:
 - `legacy`: previous defaults for A/B testing.
 
 ## Smart Snapping
-Smart snapping uses UI Automation to pull the cursor toward interactive controls.
+Smart snapping uses UI Automation (via `pywinauto`) to pull the cursor toward interactive controls.
 - Enable/disable with `S`.
 - Trigger mode defaults to always-on (see `Config.SNAP_TRIGGER_MODE`).
 - Brows raise can be used as a trigger.
@@ -94,6 +95,7 @@ Smart snapping uses UI Automation to pull the cursor toward interactive controls
 Diagnostics:
 - Press `D` to log the element under the cursor (`SNAP_DEBUG` in `events.log`).
 - Run `python diagnose_snap.py` to verify UIA availability.
+- `snap_debug.txt` records snapper scan traces for deeper troubleshooting.
 - Run `python debug_brows.py` to measure brow ratios.
 
 ## Configuration

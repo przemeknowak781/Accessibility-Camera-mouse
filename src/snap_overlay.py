@@ -1,32 +1,28 @@
 """
-Screen overlay for visualizing snap targets.
-Uses tkinter for a transparent always-on-top window.
+Snap target marker - small window that follows the snap target.
+Uses a tiny always-on-top window instead of drawing on desktop.
 """
-import tkinter as tk
 import threading
-import time
+import tkinter as tk
 
 
-class SnapOverlay:
-    """Transparent overlay window showing detected UI elements."""
+class SnapMarker:
+    """Small marker window showing snap target location."""
     
     def __init__(self):
-        self._elements = []  # List of (x, y, w, h, label) tuples
-        self._target = None  # Current snap target (x, y)
-        self._cursor = None  # Current cursor position
+        self._target = None
         self._lock = threading.Lock()
         self._running = False
         self._root = None
-        self._canvas = None
         
     def start(self):
-        """Start overlay in a separate thread."""
+        """Start marker in separate thread."""
         self._running = True
-        t = threading.Thread(target=self._run_tk, daemon=True)
+        t = threading.Thread(target=self._run, daemon=True)
         t.start()
         
     def stop(self):
-        """Stop overlay."""
+        """Stop marker."""
         self._running = False
         if self._root:
             try:
@@ -34,151 +30,98 @@ class SnapOverlay:
             except:
                 pass
     
-    def set_elements(self, elements):
-        """Set list of detected elements: [(x, y, w, h, label), ...]"""
-        with self._lock:
-            self._elements = list(elements) if elements else []
-            
     def set_target(self, target):
-        """Set current snap target: (x, y) or None"""
+        """Set target position: (x, y) or None to hide."""
         with self._lock:
             self._target = target
-            
-    def set_cursor(self, pos):
-        """Set current cursor position: (x, y)"""
-        with self._lock:
-            self._cursor = pos
     
-    def _run_tk(self):
-        """Main tkinter loop - runs in separate thread."""
+    def _run(self):
+        """Main loop."""
         try:
             self._root = tk.Tk()
-            self._root.title("Snap Overlay")
+            self._root.title("")
             
-            # Get screen size
-            screen_w = self._root.winfo_screenwidth()
-            screen_h = self._root.winfo_screenheight()
+            # Small window size
+            size = 50
             
-            # Make window fullscreen, transparent, click-through
-            self._root.geometry(f"{screen_w}x{screen_h}+0+0")
+            # Configure window
             self._root.overrideredirect(True)  # No title bar
-            self._root.attributes('-topmost', True)  # Always on top
-            self._root.attributes('-transparentcolor', 'black')  # Black = transparent
-            self._root.config(bg='black')
+            self._root.attributes('-topmost', True)
+            self._root.attributes('-transparentcolor', '#ff00ff')
+            self._root.config(bg='#ff00ff')
+            self._root.geometry(f"{size}x{size}+0+0")
             
-            # Make window click-through on Windows
-            try:
-                import ctypes
-                hwnd = ctypes.windll.user32.GetForegroundWindow()
-                # Get the real hwnd of tkinter window
-                hwnd = self._root.winfo_id()
-                # Extended window style for layered + transparent
-                GWL_EXSTYLE = -20
-                WS_EX_LAYERED = 0x00080000
-                WS_EX_TRANSPARENT = 0x00000020
-                style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, 
-                    style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
-            except Exception as e:
-                print(f"Could not set click-through: {e}")
-            
-            # Canvas for drawing
-            self._canvas = tk.Canvas(
-                self._root, 
-                width=screen_w, 
-                height=screen_h,
-                bg='black',
+            # Canvas with crosshair
+            canvas = tk.Canvas(
+                self._root,
+                width=size,
+                height=size,
+                bg='#ff00ff',
                 highlightthickness=0
             )
-            self._canvas.pack()
+            canvas.pack()
             
-            # Start update loop
-            self._update()
-            
-            self._root.mainloop()
-        except Exception as e:
-            print(f"Overlay error: {e}")
-            
-    def _update(self):
-        """Update overlay drawing."""
-        if not self._running or not self._canvas:
-            return
-            
-        # Clear canvas
-        self._canvas.delete("all")
-        
-        with self._lock:
-            elements = list(self._elements)
-            target = self._target
-            cursor = self._cursor
-        
-        # Draw detected elements as rectangles
-        for elem in elements:
-            if len(elem) >= 4:
-                x, y, w, h = elem[:4]
-                label = elem[4] if len(elem) > 4 else ""
-                
-                # Draw rectangle outline
-                self._canvas.create_rectangle(
-                    x, y, x + w, y + h,
-                    outline='#00FF00',  # Green
-                    width=2
-                )
-                
-                # Draw label
-                if label:
-                    self._canvas.create_text(
-                        x + 2, y + 2,
-                        text=label,
-                        fill='#00FF00',
-                        anchor='nw',
-                        font=('Arial', 9)
-                    )
-        
-        # Draw snap target as crosshair
-        if target:
-            tx, ty = target
-            size = 20
-            # Outer circle
-            self._canvas.create_oval(
-                tx - size, ty - size, tx + size, ty + size,
-                outline='#FF6600',  # Orange
-                width=3
+            # Draw crosshair (stays static, window moves)
+            center = size // 2
+            r = 18
+            # Circle
+            canvas.create_oval(
+                center - r, center - r, center + r, center + r,
+                outline='#FF6600', width=3
             )
-            # Inner dot
-            self._canvas.create_oval(
-                tx - 4, ty - 4, tx + 4, ty + 4,
-                fill='#FF6600',
-                outline='#FF6600'
+            # Center dot
+            canvas.create_oval(
+                center - 4, center - 4, center + 4, center + 4,
+                fill='#FF6600', outline='#FF6600'
             )
             # Crosshair lines
-            self._canvas.create_line(tx - size - 5, ty, tx - size + 10, ty, fill='#FF6600', width=2)
-            self._canvas.create_line(tx + size - 10, ty, tx + size + 5, ty, fill='#FF6600', width=2)
-            self._canvas.create_line(tx, ty - size - 5, tx, ty - size + 10, fill='#FF6600', width=2)
-            self._canvas.create_line(tx, ty + size - 10, tx, ty + size + 5, fill='#FF6600', width=2)
-        
-        # Draw snap radius around cursor
-        if cursor:
-            cx, cy = cursor
-            from src.config import Config
-            radius = Config.SNAP_RADIUS
-            self._canvas.create_oval(
-                cx - radius, cy - radius, cx + radius, cy + radius,
-                outline='#3366FF',  # Blue
-                width=1,
-                dash=(4, 4)
-            )
-        
-        # Schedule next update (30 FPS)
-        self._root.after(33, self._update)
+            canvas.create_line(center - r - 8, center, center - r + 5, center, fill='#FF6600', width=2)
+            canvas.create_line(center + r - 5, center, center + r + 8, center, fill='#FF6600', width=2)
+            canvas.create_line(center, center - r - 8, center, center - r + 5, fill='#FF6600', width=2)
+            canvas.create_line(center, center + r - 5, center, center + r + 8, fill='#FF6600', width=2)
+            
+            self._root.update()
+            
+            # Make click-through
+            try:
+                import ctypes
+                hwnd = self._root.winfo_id()
+                GWL_EXSTYLE = -20
+                WS_EX_LAYERED = 0x80000
+                WS_EX_TRANSPARENT = 0x20
+                style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+            except:
+                pass
+            
+            # Hide initially
+            self._root.withdraw()
+            
+            # Update loop
+            def update():
+                if not self._running:
+                    self._root.quit()
+                    return
+                    
+                with self._lock:
+                    target = self._target
+                
+                if target:
+                    x, y = int(target[0]), int(target[1])
+                    # Position window centered on target
+                    self._root.geometry(f"+{x - size//2}+{y - size//2}")
+                    self._root.deiconify()
+                else:
+                    self._root.withdraw()
+                
+                self._root.after(30, update)  # ~30 FPS
+            
+            update()
+            self._root.mainloop()
+            
+        except Exception as e:
+            print(f"SnapMarker error: {e}")
 
 
-# Global overlay instance
-_overlay = None
-
-def get_overlay():
-    """Get or create global overlay instance."""
-    global _overlay
-    if _overlay is None:
-        _overlay = SnapOverlay()
-    return _overlay
+# Alias for compatibility
+GDIOverlay = SnapMarker
