@@ -2,8 +2,8 @@ from dataclasses import dataclass
 
 @dataclass
 class Config:
-    # Tuning preset: "precision" (default), "balanced", "fast", "stable", "legacy"
-    PRESET_NAME: str = "precision"
+    # Tuning preset: "precision", "balanced", "fast", "turbo", "swift", "snappy", "stable", "legacy"
+    PRESET_NAME: str = "swift"
 
     # Camera Settings
     CAM_WIDTH: int = 640
@@ -44,13 +44,12 @@ class Config:
     SNAP_ENABLED: bool = True
     SNAP_TRIGGER_MODE: str = "ALWAYS" # "BROWS" or "ALWAYS"
     SNAP_RADIUS: float = 80.0  # Larger magnet range
-    SNAP_STRENGTH: float = 0.5  # Stronger attraction (was 0.25)
-    SNAP_LOCK_RADIUS: float = 12.0  # Lock when very close
-    SNAP_LOCK_STRENGTH: float = 0.9
-    SNAP_BREAKOUT_SPEED: float = 60.0  # Speed to break free
-    SNAP_INTERVAL: float = 0.08  # Faster scanning
-    SNAP_TARGET_HOLD_SECONDS: float = 0.4
-    SNAP_TARGET_SMOOTH: float = 0.4
+    SNAP_STRENGTH: float = 0.7  # Stronger attraction (was 0.5)
+    SNAP_LOCK_RADIUS: float = 18.0  # Lock when very close
+    SNAP_LOCK_STRENGTH: float = 0.98
+    SNAP_BREAKOUT_SPEED: float = 80.0  # Speed to break free
+    SNAP_INTERVAL: float = 0.05  # Faster scanning
+    SNAP_TARGET_HOLD_SECONDS: float = 0.12
     SNAP_BROW_HOLD_SECONDS: float = 0.5
     BROWS_THRESHOLD: float = 1.2
     

@@ -86,7 +86,7 @@ Press `F6` to cycle presets:
 - `legacy`: previous defaults for A/B testing.
 
 ## Smart Snapping
-Smart snapping uses UI Automation (via `pywinauto`) to pull the cursor toward interactive controls.
+Smart snapping uses UI Automation (via `uiautomation`) to pull the cursor toward interactive controls.
 - Enable/disable with `S`.
 - Trigger mode defaults to always-on (see `Config.SNAP_TRIGGER_MODE`).
 - Brows raise can be used as a trigger.

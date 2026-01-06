@@ -52,6 +52,50 @@ PRESETS: dict[str, Preset] = {
             "MOUSE_SPEED_COEFF": 45.0,
         },
     ),
+    "turbo": Preset(
+        name="turbo",
+        description="Maximum speed, minimal damping - for large screens.",
+        overrides={
+            "HEAD_SPEED_MIN": 120.0,
+            "HEAD_SPEED_MAX": 3200.0,
+            "HEAD_EXP": 0.8,
+            "HEAD_MICRO_GAIN": 1.2,
+            "HEAD_MICRO_RADIUS": 3.0,
+            "HEAD_PRECISION_RADIUS": 8.0,
+            "HEAD_SENSITIVITY": 8.0,
+            "MOUSE_SPEED_COEFF": 55.0,
+            "SNAP_STRENGTH": 0.6,
+        },
+    ),
+    "swift": Preset(
+        name="swift",
+        description="Fast but smooth - good for general use.",
+        overrides={
+            "HEAD_SPEED_MIN": 60.0,
+            "HEAD_EXP": 1.0,
+            "HEAD_MICRO_GAIN": 0.9,
+            "HEAD_MICRO_RADIUS": 5.0,
+            "HEAD_PRECISION_RADIUS": 12.0,
+            "HEAD_NEUTRAL_ALPHA": 0.06,
+            "MOUSE_SPEED_COEFF": 40.0,
+            "SMOOTHING_MIN_CUTOFF": 0.7,
+        },
+    ),
+    "snappy": Preset(
+        name="snappy",
+        description="Quick response with strong snap assist.",
+        overrides={
+            "HEAD_SPEED_MIN": 100.0,
+            "HEAD_EXP": 0.85,
+            "HEAD_MICRO_GAIN": 1.1,
+            "HEAD_MICRO_RADIUS": 4.0,
+            "HEAD_PRECISION_RADIUS": 10.0,
+            "MOUSE_SPEED_COEFF": 50.0,
+            "SNAP_STRENGTH": 0.65,
+            "SNAP_RADIUS": 100.0,
+            "SNAP_LOCK_RADIUS": 15.0,
+        },
+    ),
     "stable": Preset(
         name="stable",
         description="Extra stability for noisy tracking (slightly more lag).",
@@ -83,7 +127,7 @@ PRESETS: dict[str, Preset] = {
     ),
 }
 
-PRESET_ORDER = ["precision", "balanced", "fast", "stable", "legacy"]
+PRESET_ORDER = ["precision", "balanced", "fast", "turbo", "swift", "snappy", "stable", "legacy"]
 
 
 def apply_preset(config, preset_name: str | None) -> str:

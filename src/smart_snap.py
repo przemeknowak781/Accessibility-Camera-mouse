@@ -1,47 +1,96 @@
-"""
-SmartSnapper - UI element detection for cursor snapping.
-Uses pywinauto to find interactive elements under the cursor.
-"""
 import threading
 import time
-import math
 
 try:
-    from pywinauto import Desktop
-    HAS_PYWINAUTO = True
-except ImportError:
-    HAS_PYWINAUTO = False
+    import uiautomation as auto
+except Exception:
+    auto = None
 
 from src.config import Config
 
 
 class SmartSnapper(threading.Thread):
-    def __init__(self, overlay=None):
+    def __init__(self):
         super().__init__(daemon=True)
         self._lock = threading.Lock()
         self._cursor_pos = None
         self._current_target = None
+        self._last_target = None
         self._active = False
         self._running = True
-        self.available = HAS_PYWINAUTO
-        self._overlay = overlay  # Not used when overlay is None
-        
-        # Interactive control types (pywinauto friendly names)
-        self._interactive = {
-            "Button", "Hyperlink", "MenuItem", "TreeItem", "HeaderItem",
-            "Edit", "CheckBox", "RadioButton", "ToggleButton", "SplitButton",
-            "ComboBox", "ListItem", "TabItem", "Slider", "Spinner", 
-            "ScrollBar", "Thumb", "DataItem", "Link", "Image", "Tab",
-            "List", "Header", "ToolBar", "ToolItem", "Pane", "Group"
+        self.available = auto is not None
+
+        self._allowed_types = set()
+        if auto is not None:
+            control_names = [
+                "ButtonControl",
+                "HyperlinkControl",
+                "MenuItemControl",
+                "EditControl",
+                "ListItemControl",
+                "TabItemControl",
+                "CheckBoxControl",
+                "RadioButtonControl",
+                "ComboBoxControl",
+                "SliderControl",
+                "SplitButtonControl",
+                "ToggleButtonControl",
+                "TreeItemControl",
+                "SpinnerControl",
+            ]
+            for name in control_names:
+                control = getattr(auto.ControlType, name, None)
+                if control is not None:
+                    self._allowed_types.add(control)
+        self._allowed_names = {
+            "Button",
+            "ButtonControl",
+            "Hyperlink",
+            "HyperlinkControl",
+            "MenuItem",
+            "MenuItemControl",
+            "Edit",
+            "EditControl",
+            "ListItem",
+            "ListItemControl",
+            "TabItem",
+            "TabItemControl",
+            "CheckBox",
+            "CheckBoxControl",
+            "RadioButton",
+            "RadioButtonControl",
+            "ComboBox",
+            "ComboBoxControl",
+            "Slider",
+            "SliderControl",
+            "SplitButton",
+            "SplitButtonControl",
+            "ToggleButton",
+            "ToggleButtonControl",
+            "TreeItem",
+            "TreeItemControl",
+            "Spinner",
+            "SpinnerControl",
         }
-        # Only ignore these top-level containers
-        self._ignore = {"Window", "Document", "TitleBar"}
+        self._container_names = {
+            "Pane",
+            "PaneControl",
+            "Window",
+            "WindowControl",
+            "Document",
+            "DocumentControl",
+            "Group",
+            "GroupControl",
+            "Custom",
+            "CustomControl",
+        }
 
     def set_active(self, active):
         with self._lock:
             self._active = bool(active)
             if not self._active:
                 self._current_target = None
+                self._last_target = None
 
     def update_cursor_pos(self, x, y):
         with self._lock:
@@ -54,121 +103,151 @@ class SmartSnapper(threading.Thread):
     def stop(self):
         self._running = False
 
-    def _is_interactive(self, wrapper):
-        """Check if element is interactive."""
+    @staticmethod
+    def _distance_to_rect(rect, x, y):
+        if not rect:
+            return None
+        cx = min(max(x, rect.left), rect.right)
+        cy = min(max(y, rect.top), rect.bottom)
+        dx = cx - x
+        dy = cy - y
+        return (dx * dx + dy * dy) ** 0.5
+
+    @staticmethod
+    def _distance_to_point(x, y, cx, cy):
+        dx = cx - x
+        dy = cy - y
+        return (dx * dx + dy * dy) ** 0.5
+
+    @staticmethod
+    def _clickable_point(element):
         try:
-            ctype = wrapper.friendly_class_name()
-            if ctype in self._ignore:
-                return False
-            if ctype in self._interactive:
-                return True
-            # Check invoke pattern (clickable)
+            point = element.GetClickablePoint()
+            if point:
+                return float(point.x), float(point.y)
+        except Exception:
+            return None
+        return None
+
+    def _is_allowed_element(self, element):
+        if element is None:
+            return False
+        control_type = getattr(element, "ControlType", None)
+        if control_type in self._allowed_types:
+            return True
+        name = getattr(element, "ControlTypeName", None)
+        if name in self._allowed_names:
+            return True
+        if self._clickable_point(element):
+            return True
+        return False
+
+    def _target_from_element(self, element, x, y, snap_radius):
+        clickable = self._clickable_point(element)
+        if clickable:
+            cx, cy = clickable
+            dist = self._distance_to_point(x, y, cx, cy)
+        else:
+            rect = getattr(element, "BoundingRectangle", None)
+            if rect:
+                cx = (rect.left + rect.right) * 0.5
+                cy = (rect.top + rect.bottom) * 0.5
+                dist = self._distance_to_rect(rect, x, y)
+            else:
+                return None
+        if dist is None or dist > snap_radius:
+            return None
+        return (float(cx), float(cy))
+
+    def _pick_target(self, element, x, y, snap_radius):
+        ctrl = element
+        for _ in range(4):
+            if ctrl is None:
+                break
+            if self._is_allowed_element(ctrl):
+                target = self._target_from_element(ctrl, x, y, snap_radius)
+                if target is not None:
+                    return target
             try:
-                if wrapper.is_invoke_pattern_available():
-                    return True
-            except:
-                pass
-            return False
-        except:
-            return False
+                ctrl = ctrl.GetParentControl()
+            except Exception:
+                break
+
+        if element is None:
+            return None
+        try:
+            stack = list(element.GetChildren() or [])
+        except Exception:
+            return None
+
+        best_target = None
+        best_dist = None
+        visited = 0
+        while stack and visited < 80:
+            child = stack.pop(0)
+            visited += 1
+            if self._is_allowed_element(child):
+                target = self._target_from_element(child, x, y, snap_radius)
+                if target is not None:
+                    dist = self._distance_to_point(x, y, target[0], target[1])
+                    if best_dist is None or dist < best_dist:
+                        best_target = target
+                        best_dist = dist
+            ctype = getattr(child, "ControlTypeName", None)
+            if ctype in self._container_names:
+                try:
+                    kids = child.GetChildren() or []
+                except Exception:
+                    kids = []
+                if kids:
+                    stack.extend(kids[:10])
+        return best_target
 
     def run(self):
-        with open("snap_debug.txt", "w", encoding="utf-8") as f:
-            f.write(f"SmartSnapper: Started. Available={self.available}\n")
-
         if not self.available:
-            with open("snap_debug.txt", "a", encoding="utf-8") as f:
-                f.write("Pywinauto not available!\n")
             return
 
+        init = getattr(auto, "InitializeUIAutomationInThread", None)
+        uninit = getattr(auto, "UninitializeUIAutomationInThread", None)
+        if init:
+            init()
         try:
-            desktop = Desktop(backend='uia')
-            with open("snap_debug.txt", "a", encoding="utf-8") as f:
-                f.write("Desktop OK\n")
-        except Exception as e:
-            with open("snap_debug.txt", "a", encoding="utf-8") as f:
-                f.write(f"Desktop failed: {e}\n")
-            return
-        
-        loop_count = 0
-        
-        while self._running:
-            try:
+            while self._running:
                 with self._lock:
                     active = self._active
                     pos = self._cursor_pos
-                
                 if not active or pos is None:
                     time.sleep(Config.SNAP_INTERVAL)
                     continue
-
-                loop_count += 1
                 x, y = pos
                 target = None
-                
-                # Get element at cursor
-                wrapper = None
                 try:
-                    wrapper = desktop.from_point(x, y)
-                except Exception as e:
-                    if loop_count % 20 == 1:
-                        with open("snap_debug.txt", "a", encoding="utf-8") as f:
-                            f.write(f"from_point error: {e}\n")
-                
-                if wrapper:
-                    # Find interactive element (current or parent)
-                    curr = wrapper
-                    found = None
-                    path = []
-                    
-                    for _ in range(6):
-                        try:
-                            ctype = curr.friendly_class_name()
-                            path.append(ctype)
-                            
-                            if self._is_interactive(curr):
-                                found = curr
-                                break
-                            
-                            parent = curr.parent()
-                            if not parent:
-                                break
-                            curr = parent
-                        except:
-                            break
-                    
-                    if found:
-                        try:
-                            rect = found.rectangle()
-                            cx = rect.left + rect.width() / 2
-                            cy = rect.top + rect.height() / 2
-                            ctype = found.friendly_class_name()
-                            
-                            dx = cx - x
-                            dy = cy - y
-                            dist = math.hypot(dx, dy)
-                            
-                            if dist <= Config.SNAP_RADIUS:
-                                target = (float(cx), float(cy))
-                                
-                                # Log occasionally
-                                if loop_count % 10 == 1:
-                                    with open("snap_debug.txt", "a", encoding="utf-8") as f:
-                                        f.write(f"Target: {ctype} @ {int(cx)},{int(cy)} dist={int(dist)}\n")
-                        except:
-                            pass
+                    if hasattr(auto, "ControlFromPoint"):
+                        element = auto.ControlFromPoint(int(x), int(y))
                     else:
-                        # Log what we found
-                        if loop_count % 30 == 1:
-                            with open("snap_debug.txt", "a", encoding="utf-8") as f:
-                                f.write(f"No target. Path: {' > '.join(path[:4])}\n")
+                        element = auto.ControlFromPoint2(int(x), int(y))
+                    candidate = self._pick_target(element, x, y, Config.SNAP_RADIUS)
+                    if candidate is not None and self._last_target is not None:
+                        cand_dist = self._distance_to_point(x, y, candidate[0], candidate[1])
+                        prev_dist = self._distance_to_point(
+                            x, y, self._last_target[0], self._last_target[1]
+                        )
+                        sticky_margin = max(6.0, Config.SNAP_RADIUS * 0.15)
+                        if prev_dist <= Config.SNAP_RADIUS and prev_dist <= cand_dist + sticky_margin:
+                            target = self._last_target
+                        else:
+                            target = candidate
+                    else:
+                        target = candidate
+                except Exception:
+                    target = None
 
                 with self._lock:
                     self._current_target = target
+                    if target is not None:
+                        self._last_target = target
 
                 time.sleep(Config.SNAP_INTERVAL)
-
-            except Exception as e:
-                with open("snap_debug.txt", "a", encoding="utf-8") as f:
-                    f.write(f"Loop error: {e}\n")
-                time.sleep(0.2)
+        finally:
+            if uninit:
+                uninit()
