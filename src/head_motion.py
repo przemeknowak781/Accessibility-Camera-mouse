@@ -45,10 +45,19 @@ class HeadMotion:
         if not landmarks:
             return None
 
-        min_x = min(lm.x for lm in landmarks)
-        max_x = max(lm.x for lm in landmarks)
-        min_y = min(lm.y for lm in landmarks)
-        max_y = max(lm.y for lm in landmarks)
+        # Single pass to find min/max for both axes
+        first = landmarks[0]
+        min_x = max_x = first.x
+        min_y = max_y = first.y
+        for lm in landmarks[1:]:
+            if lm.x < min_x:
+                min_x = lm.x
+            elif lm.x > max_x:
+                max_x = lm.x
+            if lm.y < min_y:
+                min_y = lm.y
+            elif lm.y > max_y:
+                max_y = lm.y
         span_x = max(max_x - min_x, 1e-6)
         span_y = max(max_y - min_y, 1e-6)
         cx = (min_x + max_x) * 0.5
